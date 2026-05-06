@@ -13,6 +13,13 @@ import { Dialog, ICommandPalette, MainAreaWidget } from '@jupyterlab/apputils';
 import { IMainMenu } from '@jupyterlab/mainmenu';
 
 import { IEditorLanguageRegistry } from '@jupyterlab/codemirror';
+import { Extension, StateEffect, StateField } from '@codemirror/state';
+import {
+  Decoration,
+  DecorationSet,
+  EditorView,
+  WidgetType
+} from '@codemirror/view';
 
 import { CodeCell } from '@jupyterlab/cells';
 import { ISharedNotebook } from '@jupyter/ydoc';
@@ -50,6 +57,8 @@ import {
   ChatSidebar,
   FormInputDialogBody,
   GitHubCopilotLoginDialogBody,
+  IInlinePromptWidgetOptions,
+  InlinePopoverComponent,
   GitHubCopilotStatusBarItem,
   InlinePromptWidget,
   RunChatCompletionType
@@ -95,9 +104,180 @@ import { cellOutputAsContextBundle } from './cell-output-bundle';
 import { UUID } from '@lumino/coreutils';
 
 import * as path from 'path';
+import { createRoot, Root } from 'react-dom/client';
 import { SettingsPanel } from './components/settings-panel';
 import { ITerminalConnection } from '@jupyterlab/services/lib/terminal/terminal';
 import { NotebookGenerationToolbarExtension } from './notebook-generation-toolbar';
+
+const addInlinePromptEffect = StateEffect.define<{
+  pos: number;
+  widget: InlinePromptBlockWidget;
+}>();
+const removeInlinePromptEffect = StateEffect.define<void>();
+
+const inlinePromptField = StateField.define<DecorationSet>({
+  create() {
+    return Decoration.none;
+  },
+  update(decorations, transaction) {
+    decorations = decorations.map(transaction.changes);
+
+    for (const effect of transaction.effects) {
+      if (effect.is(removeInlinePromptEffect)) {
+        decorations = Decoration.none;
+      } else if (effect.is(addInlinePromptEffect)) {
+        decorations = Decoration.set([
+          Decoration.widget({
+            block: true,
+            side: 1,
+            widget: effect.value.widget
+          }).range(effect.value.pos)
+        ]);
+      }
+    }
+
+    return decorations;
+  },
+  provide: field => EditorView.decorations.from(field)
+});
+
+class InlinePromptBlockWidget extends WidgetType {
+  constructor(
+    private readonly _content: React.ReactElement,
+    private readonly _onNodeCreated: (node: HTMLElement) => void,
+    private readonly _onDismissRequested: () => void
+  ) {
+    super();
+  }
+
+  eq(other: WidgetType): boolean {
+    return other === this;
+  }
+
+  toDOM(): HTMLElement {
+    const host = document.createElement('div');
+    host.className = 'nbi-inline-prompt-block';
+    host.contentEditable = 'false';
+
+    const node = document.createElement('div');
+    node.className = 'inline-prompt-widget inline-prompt-widget-inline';
+    node.style.height = '48px';
+    host.appendChild(node);
+
+    // Bubble-phase stopPropagation so JupyterLab's document-level
+    // keybindings (Ctrl+S, etc.) don't intercept keys typed in the
+    // textarea. CM's own handling is already opted out via ignoreEvent;
+    // this is purely about JL keymap.
+    const stopEditorEvent = (event: Event) => event.stopPropagation();
+    for (const eventName of [
+      'keydown',
+      'keypress',
+      'keyup',
+      'mousedown',
+      'mouseup',
+      'click',
+      'pointerdown',
+      'pointerup',
+      'input',
+      'beforeinput'
+    ]) {
+      host.addEventListener(eventName, stopEditorEvent);
+    }
+
+    // While the popover is mounted, suppress JupyterLab's notebook-panel
+    // _evtFocusIn handler for focus events inside the owning cell. Without
+    // this, JL's _ensureFocus reacts to every focusin on the textarea by
+    // refocusing .cm-content, which then triggers our own refocus, which
+    // re-fires JL — an infinite loop until the stack overflows.
+    //
+    // Capture-phase listener on document fires before JL's bubble-phase
+    // handler on the notebook panel; stopPropagation here is sufficient.
+    // The owning .cm-content / .jp-Cell are resolved inside the handler
+    // because at toDOM() time the host is created but not yet inserted.
+    this._focusinGuard = (event: FocusEvent) => {
+      if (!host.isConnected) {
+        return;
+      }
+      const ownCmContent = host.closest('.cm-content');
+      if (!ownCmContent) {
+        return;
+      }
+      const ownCell = ownCmContent.closest('.jp-Cell');
+      const target = event.target as HTMLElement | null;
+      if (!ownCell || !target || !ownCell.contains(target)) {
+        return;
+      }
+
+      event.stopPropagation();
+
+      if (target === ownCmContent) {
+        const ta = node.querySelector('textarea');
+        if (ta && document.activeElement !== ta) {
+          ta.focus({ preventScroll: true });
+        }
+      }
+    };
+    document.addEventListener('focusin', this._focusinGuard, true);
+
+    // Outside-click / focus-leave dismissal. The previous floating-widget
+    // path relied on InlinePromptWidget's own focusout listener; the
+    // block-widget path mounts the React tree directly so we replicate
+    // it here. Focus moving within the popover (textarea -> Accept /
+    // Cancel) is ignored.
+    host.addEventListener('focusout', (event: FocusEvent) => {
+      const next = event.relatedTarget as Node | null;
+      if (next && host.contains(next)) {
+        return;
+      }
+      this._onDismissRequested();
+    });
+
+    this._root = createRoot(node);
+    this._root.render(this._content);
+    this._onNodeCreated(node);
+    return host;
+  }
+
+  ignoreEvent(): boolean {
+    return true;
+  }
+
+  destroy(): void {
+    if (this._focusinGuard) {
+      document.removeEventListener('focusin', this._focusinGuard, true);
+      this._focusinGuard = null;
+    }
+    this._root?.unmount();
+    this._root = null;
+  }
+
+  private _root: Root | null = null;
+  private _focusinGuard: ((event: FocusEvent) => void) | null = null;
+}
+
+function getCodeMirrorView(editor: CodeEditor.IEditor): EditorView | null {
+  const codeMirrorEditor = editor as CodeEditor.IEditor & {
+    editor?: EditorView;
+  };
+  return codeMirrorEditor.editor ?? null;
+}
+
+function ensureInlinePromptExtension(view: EditorView): void {
+  if (view.state.field(inlinePromptField, false)) {
+    return;
+  }
+  view.dispatch({
+    effects: StateEffect.appendConfig.of([inlinePromptField] as Extension[])
+  });
+}
+
+function getLineEndOffset(editor: CodeEditor.IEditor, offset: number): number {
+  const position = editor.getPositionAt(offset);
+  return editor.getOffsetAt({
+    line: position.line,
+    column: editor.getLine(position.line).length
+  });
+}
 
 namespace CommandIDs {
   export const chatuserInput = 'notebook-intelligence:chat-user-input';
@@ -703,6 +883,7 @@ const plugin: JupyterFrontEndPlugin<INotebookIntelligence> = {
     await NBIAPI.initialize();
 
     let openPopover: InlinePromptWidget | null = null;
+    let closeOpenPopover: (() => void) | null = null;
     let mcpConfigEditor: MCPConfigEditor | null = null;
 
     completionManager.registerInlineProvider(
@@ -1686,7 +1867,9 @@ const plugin: JupyterFrontEndPlugin<INotebookIntelligence> = {
         return rect;
       };
 
-      const rect = getRectAtCursor();
+      const editorView = isCodeCell ? getCodeMirrorView(editor) : null;
+      const useEditorBlock = editorView !== null;
+      const rect = useEditorBlock ? null : getRectAtCursor();
 
       const updatePopoverPosition = () => {
         if (openPopover !== null) {
@@ -1698,6 +1881,9 @@ const plugin: JupyterFrontEndPlugin<INotebookIntelligence> = {
       const inputResizeObserver = new ResizeObserver(updatePopoverPosition);
 
       const addPositionListeners = () => {
+        if (useEditorBlock) {
+          return;
+        }
         inputResizeObserver.observe(codeInput);
         if (scrollEl) {
           scrollEl.addEventListener('scroll', updatePopoverPosition);
@@ -1705,17 +1891,36 @@ const plugin: JupyterFrontEndPlugin<INotebookIntelligence> = {
       };
 
       const removePositionListeners = () => {
+        if (useEditorBlock) {
+          return;
+        }
         inputResizeObserver.unobserve(codeInput);
         if (scrollEl) {
           scrollEl.removeEventListener('scroll', updatePopoverPosition);
         }
       };
 
+      let blockPromptView: EditorView | null = null;
+      let inlinePrompt: InlinePromptWidget | null = null;
+      let removed = false;
       const removePopover = () => {
-        if (openPopover !== null) {
-          removePositionListeners();
-          openPopover = null;
+        if (removed) {
+          return;
+        }
+        removed = true;
+        removePositionListeners();
+        closeOpenPopover = null;
+        openPopover = null;
+
+        if (blockPromptView) {
+          blockPromptView.dispatch({
+            effects: removeInlinePromptEffect.of()
+          });
+          blockPromptView = null;
+        } else if (inlinePrompt?.isAttached) {
           Widget.detach(inlinePrompt);
+        } else if (inlinePrompt?.node.parentElement) {
+          inlinePrompt.node.remove();
         }
 
         if (isCodeCell) {
@@ -1754,14 +1959,24 @@ const plugin: JupyterFrontEndPlugin<INotebookIntelligence> = {
 
       const applyGeneratedCode = () => {
         generatedContent = extractLLMGeneratedCode(generatedContent);
+        // extractLLMGeneratedCode preserves the newline that sits before
+        // the closing ``` in fenced LLM output. If the user's selection
+        // didn't already end with a newline (or there's no selection at
+        // all in the auto-insert path), inserting that trailing \n leaves
+        // an extra blank line below the generated code. Strip one
+        // trailing newline in those cases so the result matches the
+        // selection's original line-break state.
+        if (!existingCode.endsWith('\n') && generatedContent.endsWith('\n')) {
+          generatedContent = generatedContent.slice(0, -1);
+        }
         applyCodeToSelectionInEditor(editor, generatedContent);
         generatedContent = '';
         removePopover();
       };
 
-      removePopover();
+      closeOpenPopover?.();
 
-      const inlinePrompt = new InlinePromptWidget(rect, {
+      const promptOptions: IInlinePromptWidgetOptions = {
         prompt: userPrompt,
         existingCode,
         prefix: prefix,
@@ -1819,10 +2034,104 @@ const plugin: JupyterFrontEndPlugin<INotebookIntelligence> = {
           editor.focus();
         },
         telemetryEmitter: telemetryEmitter
-      });
-      openPopover = inlinePrompt;
-      addPositionListeners();
-      Widget.attach(inlinePrompt, document.body);
+      };
+
+      closeOpenPopover = removePopover;
+
+      if (editorView) {
+        let requestTime: Date | null = null;
+        let streamError: string | null = null;
+        let blockPromptNode: HTMLElement | null = null;
+        const onRequestSubmitted = (prompt: string) => {
+          if (blockPromptNode && existingCode !== '') {
+            blockPromptNode.style.height = '300px';
+          }
+          promptOptions.prompt = prompt;
+          promptOptions.onRequestSubmitted(prompt);
+          requestTime = new Date();
+          telemetryEmitter.emitTelemetryEvent({
+            type: TelemetryEventType.InlineChatRequest,
+            data: {
+              chatModel: {
+                provider: NBIAPI.config.chatModel.provider,
+                model: NBIAPI.config.chatModel.model
+              },
+              prompt: prompt
+            }
+          });
+        };
+        const onResponseEmit = (response: any) => {
+          if (response.type === BackendMessageType.StreamMessage) {
+            if (typeof response.data?.nbi_stream_error === 'string') {
+              streamError = response.data.nbi_stream_error;
+            }
+            const responseMessage =
+              response.data['choices']?.[0]?.['delta']?.['content'];
+            if (responseMessage) {
+              promptOptions.onContentStream(responseMessage);
+            }
+          } else if (response.type === BackendMessageType.StreamEnd) {
+            promptOptions.onContentStreamEnd(streamError);
+            streamError = null;
+            const timeElapsed =
+              requestTime === null
+                ? 0
+                : (new Date().getTime() - requestTime.getTime()) / 1000;
+            telemetryEmitter.emitTelemetryEvent({
+              type: TelemetryEventType.InlineChatResponse,
+              data: {
+                chatModel: {
+                  provider: NBIAPI.config.chatModel.provider,
+                  model: NBIAPI.config.chatModel.model
+                },
+                timeElapsed
+              }
+            });
+          }
+        };
+        const widget = new InlinePromptBlockWidget(
+          React.createElement(InlinePopoverComponent, {
+            prompt: promptOptions.prompt,
+            existingCode: promptOptions.existingCode,
+            onRequestSubmitted,
+            onRequestCancelled: promptOptions.onRequestCancelled,
+            onResponseEmit,
+            prefix: promptOptions.prefix,
+            suffix: promptOptions.suffix,
+            language: promptOptions.language,
+            filename: promptOptions.filename,
+            onUpdatedCodeChange: promptOptions.onUpdatedCodeChange,
+            onUpdatedCodeAccepted: promptOptions.onUpdatedCodeAccepted
+          }),
+          node => {
+            blockPromptNode = node;
+          },
+          // Outside focus-leave dismissal. removePopover (not
+          // onRequestCancelled) so the user's new focus target keeps it —
+          // onRequestCancelled would yank focus back to the cell editor.
+          () => removePopover()
+        );
+        const anchorOffset = getLineEndOffset(
+          editor,
+          Math.max(startOffset, endOffset)
+        );
+        ensureInlinePromptExtension(editorView);
+        blockPromptView = editorView;
+        editorView.dispatch({
+          effects: [
+            addInlinePromptEffect.of({
+              pos: anchorOffset,
+              widget
+            }),
+            EditorView.scrollIntoView(anchorOffset, { y: 'center' })
+          ]
+        });
+      } else {
+        inlinePrompt = new InlinePromptWidget(rect, promptOptions);
+        openPopover = inlinePrompt;
+        addPositionListeners();
+        Widget.attach(inlinePrompt, document.body);
+      }
 
       telemetryEmitter.emitTelemetryEvent({
         type: TelemetryEventType.GenerateCodeRequest,
