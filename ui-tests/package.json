@@ -1,0 +1,16 @@
+{
+  "name": "@notebook-intelligence/ui-tests",
+  "version": "1.0.0",
+  "description": "Galata-based UI tests for the notebook-intelligence labextension.",
+  "private": true,
+  "scripts": {
+    "start": "jupyter lab --config jupyter_server_test_config.py",
+    "test": "jlpm playwright test",
+    "test:debug": "PWDEBUG=1 jlpm playwright test",
+    "test:update": "jlpm playwright test --update-snapshots"
+  },
+  "devDependencies": {
+    "@jupyterlab/galata": "^5.0.0",
+    "@playwright/test": "^1.40.0"
+  }
+}
