@@ -5,6 +5,7 @@
  * See https://github.com/jupyterlab/jupyterlab/tree/main/galata
  */
 import { defineConfig } from '@jupyterlab/galata';
+import { devices } from '@playwright/test';
 
 export default defineConfig({
   // Tests live next to this config so they can ``import { test, expect } from
@@ -32,6 +33,18 @@ export default defineConfig({
     video: 'retain-on-failure',
     appPath: '/lab'
   },
+
+  // Lock to chromium — the README only documents installing chromium and the
+  // smoke suite has no per-browser concerns. Without an explicit ``projects``
+  // declaration Playwright would run on every installed browser, which costs
+  // CI time and risks confusing failures from a half-installed firefox or
+  // webkit.
+  projects: [
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] }
+    }
+  ],
 
   // Two retries on CI absorb the occasional transient flake (kernel
   // start-up, websocket warm-up) without hiding real regressions.

@@ -163,9 +163,6 @@
         "plugins": [
             "@typescript-eslint"
         ],
-        "ignorePatterns": [
-            "ui-tests/"
-        ],
         "overrides": [
             {
                 "files": [

@@ -10,22 +10,27 @@ test.describe('notebook-intelligence extension', () => {
       // standard plugin system; presence of either the plugin id or the
       // labextension manifest entry is enough to confirm it loaded.
       const app = (window as any).jupyterapp;
-      if (!app) return false;
+      if (!app) {
+        return false;
+      }
       const ids: string[] = app.listPlugins();
-      return ids.some(id => id.startsWith('@notebook-intelligence/'));
+      return ids.some((id: string) => id.startsWith('@notebook-intelligence/'));
     });
     expect(installed).toBe(true);
   });
 
   test('chat sidebar can be opened from the side panel', async ({ page }) => {
-    // The sidebar tab is registered with a stable id; clicking it should
-    // toggle the panel into view. Once visible, the sidebar root element
-    // (``.sidebar``) lives in the lab DOM.
-    const sidebarTab = page
-      .locator('[data-id^="@notebook-intelligence"]')
-      .first();
-    await expect(sidebarTab).toBeVisible({ timeout: 30_000 });
+    // The sidebar tab id matches ``panel.id`` from src/index.ts; Lumino's
+    // TabBar renders that into ``data-id`` on the tab list element. Asserting
+    // ``toHaveCount(1)`` upfront makes a future renaming or duplicate id fail
+    // with a clear error rather than ``.first()`` quietly picking one.
+    const sidebarTab = page.locator('[data-id="notebook-intelligence-tab"]');
+    await expect(sidebarTab).toHaveCount(1, { timeout: 30_000 });
+    await expect(sidebarTab).toBeVisible();
     await sidebarTab.click();
-    await expect(page.locator('.sidebar').first()).toBeVisible();
+    // ``.sidebar`` is the chat-sidebar root inside the panel; constrain the
+    // assertion to a single visible match.
+    const sidebar = page.locator('.sidebar');
+    await expect(sidebar).toBeVisible();
   });
 });

@@ -126,7 +126,7 @@ dmypy.json
 ui-tests/test-results/
 ui-tests/playwright-report/
 ui-tests/.cache/
-ui-tests/blobstore/
+ui-tests/.tsbuild/
 
 # OSX files
 .DS_Store
