@@ -113,6 +113,10 @@
         "typescript": "~5.0.2",
         "yjs": "^13.5.0"
     },
+    "resolutions": {
+        "minimatch": "^9.0.7",
+        "prismjs": "^1.30.0"
+    },
     "sideEffects": [
         "style/*.css",
         "style/index.js"
