@@ -8,6 +8,7 @@ import {
   NBIAPI,
   PluginScope
 } from '../api';
+import { FormDialog } from './form-dialog';
 
 const SCOPES: PluginScope[] = ['user', 'project', 'local'];
 const SCOPE_HINT: Record<PluginScope, string> = {
@@ -389,76 +390,46 @@ function PluginInstallDialog(props: {
   };
 
   return (
-    <div className="nbi-modal-backdrop" onClick={props.onCancel}>
-      <div
-        className="nbi-modal-card"
-        role="dialog"
-        aria-modal="true"
-        onClick={e => e.stopPropagation()}
-        onKeyDown={e => {
-          if (e.key === 'Escape' && !submitting) {
-            props.onCancel();
-          }
-        }}
-        tabIndex={-1}
-      >
-        <div className="nbi-modal-title">Install plugin</div>
-        <div className="nbi-modal-body">
-          <div className="nbi-form-field">
-            <label>Plugin</label>
-            <input
-              type="text"
-              value={pluginRef}
-              onChange={e => setPluginRef(e.target.value)}
-              placeholder="plugin-name or plugin@marketplace"
-              autoFocus
-            />
-          </div>
-          {props.marketplaces.length === 0 && (
-            <div className="nbi-form-hint">
-              No marketplaces are configured. Add one before installing, or
-              specify <code>plugin@marketplace</code> with a known source.
-            </div>
-          )}
-          <div className="nbi-form-field">
-            <label>Scope</label>
-            <select
-              value={scope}
-              onChange={e => setScope(e.target.value as PluginScope)}
-            >
-              {SCOPES.map(s => (
-                <option key={s} value={s}>
-                  {s} — {SCOPE_HINT[s]}
-                </option>
-              ))}
-            </select>
-          </div>
-          {submitError && (
-            <div className="nbi-skills-error" role="alert">
-              {submitError}
-            </div>
-          )}
-        </div>
-        <div className="nbi-modal-actions">
-          <button
-            className="jp-Dialog-button jp-mod-reject jp-mod-styled"
-            onClick={props.onCancel}
-            disabled={submitting}
-          >
-            <div className="jp-Dialog-buttonLabel">Cancel</div>
-          </button>
-          <button
-            className="jp-Dialog-button jp-mod-accept jp-mod-styled"
-            onClick={handleSubmit}
-            disabled={!canSubmit}
-          >
-            <div className="jp-Dialog-buttonLabel">
-              {submitting ? 'Installing…' : 'Install'}
-            </div>
-          </button>
-        </div>
+    <FormDialog
+      title="Install plugin"
+      submitLabel="Install"
+      submitInProgressLabel="Installing…"
+      canSubmit={Boolean(canSubmit)}
+      submitting={submitting}
+      error={submitError}
+      onCancel={props.onCancel}
+      onSubmit={handleSubmit}
+    >
+      <div className="nbi-form-field">
+        <label>Plugin</label>
+        <input
+          type="text"
+          value={pluginRef}
+          onChange={e => setPluginRef(e.target.value)}
+          placeholder="plugin-name or plugin@marketplace"
+          autoFocus
+        />
       </div>
-    </div>
+      {props.marketplaces.length === 0 && (
+        <div className="nbi-form-hint">
+          No marketplaces are configured. Add one before installing, or specify{' '}
+          <code>plugin@marketplace</code> with a known source.
+        </div>
+      )}
+      <div className="nbi-form-field">
+        <label>Scope</label>
+        <select
+          value={scope}
+          onChange={e => setScope(e.target.value as PluginScope)}
+        >
+          {SCOPES.map(s => (
+            <option key={s} value={s}>
+              {s} — {SCOPE_HINT[s]}
+            </option>
+          ))}
+        </select>
+      </div>
+    </FormDialog>
   );
 }
 
@@ -490,79 +461,49 @@ function MarketplaceAddDialog(props: {
   };
 
   return (
-    <div className="nbi-modal-backdrop" onClick={props.onCancel}>
-      <div
-        className="nbi-modal-card"
-        role="dialog"
-        aria-modal="true"
-        onClick={e => e.stopPropagation()}
-        onKeyDown={e => {
-          if (e.key === 'Escape' && !submitting) {
-            props.onCancel();
+    <FormDialog
+      title="Add plugin marketplace"
+      submitLabel="Add"
+      submitInProgressLabel="Adding…"
+      canSubmit={Boolean(canSubmit)}
+      submitting={submitting}
+      error={submitError}
+      onCancel={props.onCancel}
+      onSubmit={handleSubmit}
+    >
+      <div className="nbi-form-field">
+        <label>Source</label>
+        <input
+          type="text"
+          value={source}
+          onChange={e => setSource(e.target.value)}
+          placeholder={
+            props.allowGithubImport
+              ? 'owner/repo, https://github.com/owner/repo, or local path'
+              : 'https://… or local path'
           }
-        }}
-        tabIndex={-1}
-      >
-        <div className="nbi-modal-title">Add plugin marketplace</div>
-        <div className="nbi-modal-body">
-          <div className="nbi-form-field">
-            <label>Source</label>
-            <input
-              type="text"
-              value={source}
-              onChange={e => setSource(e.target.value)}
-              placeholder={
-                props.allowGithubImport
-                  ? 'owner/repo, https://github.com/owner/repo, or local path'
-                  : 'https://… or local path'
-              }
-              autoFocus
-            />
-          </div>
-          {!props.allowGithubImport && (
-            <div className="nbi-form-hint">
-              GitHub-sourced marketplaces are disabled by your administrator.
-              Use a non-GitHub URL or a local filesystem path.
-            </div>
-          )}
-          <div className="nbi-form-field">
-            <label>Scope</label>
-            <select
-              value={scope}
-              onChange={e => setScope(e.target.value as PluginScope)}
-            >
-              {SCOPES.map(s => (
-                <option key={s} value={s}>
-                  {s} — {SCOPE_HINT[s]}
-                </option>
-              ))}
-            </select>
-          </div>
-          {submitError && (
-            <div className="nbi-skills-error" role="alert">
-              {submitError}
-            </div>
-          )}
-        </div>
-        <div className="nbi-modal-actions">
-          <button
-            className="jp-Dialog-button jp-mod-reject jp-mod-styled"
-            onClick={props.onCancel}
-            disabled={submitting}
-          >
-            <div className="jp-Dialog-buttonLabel">Cancel</div>
-          </button>
-          <button
-            className="jp-Dialog-button jp-mod-accept jp-mod-styled"
-            onClick={handleSubmit}
-            disabled={!canSubmit}
-          >
-            <div className="jp-Dialog-buttonLabel">
-              {submitting ? 'Adding…' : 'Add'}
-            </div>
-          </button>
-        </div>
+          autoFocus
+        />
       </div>
-    </div>
+      {!props.allowGithubImport && (
+        <div className="nbi-form-hint">
+          GitHub-sourced marketplaces are disabled by your administrator. Use a
+          non-GitHub URL or a local filesystem path.
+        </div>
+      )}
+      <div className="nbi-form-field">
+        <label>Scope</label>
+        <select
+          value={scope}
+          onChange={e => setScope(e.target.value as PluginScope)}
+        >
+          {SCOPES.map(s => (
+            <option key={s} value={s}>
+              {s} — {SCOPE_HINT[s]}
+            </option>
+          ))}
+        </select>
+      </div>
+    </FormDialog>
   );
 }

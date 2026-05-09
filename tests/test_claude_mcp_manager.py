@@ -165,7 +165,7 @@ class TestClaudeMCPManagerWrites:
         self, claude_home, working_dir, scope, monkeypatch
     ):
         monkeypatch.setattr(
-            "notebook_intelligence.claude_mcp_manager.resolve_claude_cli_path",
+            "notebook_intelligence._claude_cli.resolve_claude_cli_path",
             lambda: "/usr/local/bin/claude",
         )
         captured: dict = {}
@@ -215,7 +215,7 @@ class TestClaudeMCPManagerWrites:
 
     def test_remove_invokes_cli(self, claude_home, working_dir, monkeypatch):
         monkeypatch.setattr(
-            "notebook_intelligence.claude_mcp_manager.resolve_claude_cli_path",
+            "notebook_intelligence._claude_cli.resolve_claude_cli_path",
             lambda: "/usr/local/bin/claude",
         )
         captured: dict = {}
@@ -247,7 +247,7 @@ class TestClaudeMCPManagerWrites:
         self, claude_home, working_dir, monkeypatch
     ):
         monkeypatch.setattr(
-            "notebook_intelligence.claude_mcp_manager.resolve_claude_cli_path",
+            "notebook_intelligence._claude_cli.resolve_claude_cli_path",
             lambda: "/usr/local/bin/claude",
         )
 
@@ -271,7 +271,7 @@ class TestClaudeMCPManagerWrites:
         self, claude_home, working_dir, monkeypatch
     ):
         monkeypatch.setattr(
-            "notebook_intelligence.claude_mcp_manager.resolve_claude_cli_path",
+            "notebook_intelligence._claude_cli.resolve_claude_cli_path",
             lambda: None,
         )
         manager = ClaudeMCPManager(working_dir=str(working_dir))
@@ -280,7 +280,7 @@ class TestClaudeMCPManagerWrites:
 
     def test_leading_dash_name_rejected(self, claude_home, working_dir, monkeypatch):
         monkeypatch.setattr(
-            "notebook_intelligence.claude_mcp_manager.resolve_claude_cli_path",
+            "notebook_intelligence._claude_cli.resolve_claude_cli_path",
             lambda: "/usr/local/bin/claude",
         )
         manager = ClaudeMCPManager(working_dir=str(working_dir))
@@ -298,7 +298,7 @@ class TestClaudeMCPManagerWrites:
         self, claude_home, working_dir, monkeypatch
     ):
         monkeypatch.setattr(
-            "notebook_intelligence.claude_mcp_manager.resolve_claude_cli_path",
+            "notebook_intelligence._claude_cli.resolve_claude_cli_path",
             lambda: "/usr/local/bin/claude",
         )
         manager = ClaudeMCPManager(working_dir=str(working_dir))
@@ -349,7 +349,7 @@ class TestLockSerialization:
         self, claude_home, working_dir, monkeypatch
     ):
         monkeypatch.setattr(
-            "notebook_intelligence.claude_mcp_manager.resolve_claude_cli_path",
+            "notebook_intelligence._claude_cli.resolve_claude_cli_path",
             lambda: "/usr/local/bin/claude",
         )
         events: list[str] = []
@@ -387,47 +387,6 @@ class TestLockSerialization:
         assert events[3] == events[2].replace("start:", "end:")
 
 
-class TestClaudeMCPManagementPolicyGate:
-    """Mirror of TestSkillsManagementPolicyGate — ensures the prepare()
-    chokepoint short-circuits with 403 when force-off."""
-
-    @staticmethod
-    def _run_prepare(handler):
-        from jupyter_server.base.handlers import APIHandler
-
-        async def _noop(_self):
-            return None
-
-        with patch.object(APIHandler, "prepare", _noop):
-            asyncio.run(ClaudeMCPBaseHandler.prepare(handler))
-
-    def test_default_attribute_allows(self):
-        assert ClaudeMCPBaseHandler.claude_mcp_management_enabled is True
-
-    def test_prepare_rejects_when_disabled(self):
-        handler = MagicMock(spec=ClaudeMCPListHandler)
-        handler._finished = False
-        handler.policy_enabled_attr = "claude_mcp_management_enabled"
-        handler.policy_disabled_message = (
-            "Claude MCP management is disabled by your administrator"
-        )
-        handler.claude_mcp_management_enabled = False
-
-        def _finish(payload):
-            handler._finished = True
-            handler._finish_payload = payload
-
-        handler.finish.side_effect = _finish
-        self._run_prepare(handler)
-        handler.set_status.assert_called_with(403)
-        body = json.loads(handler._finish_payload)
-        assert "administrator" in body["error"].lower()
-
-    def test_prepare_passes_when_enabled(self):
-        handler = MagicMock(spec=ClaudeMCPListHandler)
-        handler._finished = False
-        handler.policy_enabled_attr = "claude_mcp_management_enabled"
-        handler.claude_mcp_management_enabled = True
-        self._run_prepare(handler)
-        handler.set_status.assert_not_called()
-        handler.finish.assert_not_called()
+# Per-family policy-gate coverage lives in `tests/test_policy_gate.py`,
+# parametrized across SkillsBaseHandler / ClaudeMCPBaseHandler /
+# PluginsBaseHandler.

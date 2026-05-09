@@ -24,7 +24,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Literal, Optional
 
-from notebook_intelligence.util import resolve_claude_cli_path
+from notebook_intelligence._claude_cli import (
+    redact_argv_for_log as _redact_argv_for_log,
+    reject_flag_smuggling,
+    run_claude_cli,
+)
 
 log = logging.getLogger(__name__)
 
@@ -33,44 +37,6 @@ VALID_SCOPES: tuple[ClaudeMCPScope, ...] = ("user", "project", "local")
 VALID_TRANSPORTS: tuple[str, ...] = ("stdio", "sse", "http")
 
 CLI_TIMEOUT_SECONDS = 30.0
-
-# Reject names / commands / URLs that start with `-` so the user can't
-# smuggle a Claude CLI flag through their position in argv.
-def _reject_flag_smuggling(*, name: str, command_or_url: str) -> None:
-    for label, value in (("name", name), ("command_or_url", command_or_url)):
-        if value.startswith("-"):
-            raise ValueError(
-                f"Invalid {label} {value!r}: leading '-' is not permitted"
-            )
-
-
-def _redact_argv_for_log(argv: list[str]) -> list[str]:
-    """Drop secret-bearing values (-e/--env/-H/--header/--client-secret/...)
-    for logs. Mirrors the helper in plugin_manager — kept local instead of
-    factored out only because the broader `_run_cli` consolidation between
-    these two managers is a tracked follow-up."""
-    redacted: list[str] = []
-    skip_next = False
-    for token in argv:
-        if skip_next:
-            redacted.append("<redacted>")
-            skip_next = False
-            continue
-        redacted.append(token)
-        if token in (
-            "-e",
-            "--env",
-            "-H",
-            "--header",
-            "--client-secret",
-            "--client-id",
-            "--token",
-            "--password",
-            "--auth",
-            "--bearer",
-        ):
-            skip_next = True
-    return redacted
 
 
 @dataclass(frozen=True)
@@ -212,21 +178,25 @@ class ClaudeMCPManager:
             raise ValueError("Missing server name")
         if not command_or_url:
             raise ValueError("Missing command or URL")
-        _reject_flag_smuggling(name=name, command_or_url=command_or_url)
+        reject_flag_smuggling("name", name)
+        reject_flag_smuggling("command_or_url", command_or_url)
 
-        cmd = self._cli_argv(["mcp", "add", "--scope", scope, "--transport", transport])
+        tail = ["mcp", "add", "--scope", scope, "--transport", transport]
         for key, value in (env or {}).items():
-            cmd.extend(["-e", f"{key}={value}"])
+            tail.extend(["-e", f"{key}={value}"])
         for key, value in (headers or {}).items():
-            cmd.extend(["-H", f"{key}: {value}"])
-        cmd.append(name)
-        cmd.append(command_or_url)
+            tail.extend(["-H", f"{key}: {value}"])
+        tail.append(name)
+        tail.append(command_or_url)
         if args:
-            cmd.append("--")
-            cmd.extend(args)
+            # `--` sentinel keeps Claude from re-parsing user-supplied args
+            # as flags; `reject_flag_smuggling` is therefore not needed for
+            # individual `args` entries.
+            tail.append("--")
+            tail.extend(args)
 
         async with self._write_lock:
-            await self._run_cli(cmd, write_op=True)
+            await self._run_cli(tail)
         srv = self.get_server(name, scope)
         if srv is None:
             # Surfaced if Claude wrote elsewhere or our reads missed it. The CLI
@@ -256,51 +226,16 @@ class ClaudeMCPManager:
             raise ValueError(f"Invalid scope {scope!r}; expected one of {VALID_SCOPES}")
         if not name:
             raise ValueError("Missing server name")
-        _reject_flag_smuggling(name=name, command_or_url=name)
+        reject_flag_smuggling("name", name)
         async with self._write_lock:
-            await self._run_cli(
-                self._cli_argv(["mcp", "remove", "--scope", scope, name]),
-                write_op=True,
-            )
+            await self._run_cli(["mcp", "remove", "--scope", scope, name])
 
     # --- internals -----------------------------------------------------
 
-    def _cli_argv(self, tail: list[str]) -> list[str]:
-        cli = resolve_claude_cli_path()
-        if not cli:
-            raise FileNotFoundError(
-                "Claude Code CLI not found on PATH (set NBI_CLAUDE_CLI_PATH or install `claude`)"
-            )
-        return [cli, *tail]
-
-    async def _run_cli(self, argv: list[str], *, write_op: bool) -> str:
-        log.info(
-            "claude mcp invocation: %s", " ".join(_redact_argv_for_log(argv[1:]))
-        )
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
+    async def _run_cli(self, tail: list[str]) -> str:
+        return await run_claude_cli(
+            tail,
             cwd=str(self._working_dir),
-            # Closed stdin keeps Claude from blocking on a project-trust or
-            # OAuth prompt; it'll fail with a clean nonzero exit instead of
-            # hanging until the timeout.
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            timeout=CLI_TIMEOUT_SECONDS,
+            label="claude mcp",
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=CLI_TIMEOUT_SECONDS
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise TimeoutError(
-                f"`claude mcp` timed out after {CLI_TIMEOUT_SECONDS}s"
-            )
-        out = stdout.decode("utf-8", errors="replace")
-        err = stderr.decode("utf-8", errors="replace")
-        if proc.returncode != 0:
-            # Surface Claude's own error message; drop empty stderr.
-            msg = (err or out).strip() or f"claude mcp failed (exit {proc.returncode})"
-            raise ValueError(msg)
-        return out

@@ -27,7 +27,11 @@ import logging
 import urllib.parse
 from typing import Any, Literal, Optional
 
-from notebook_intelligence.util import resolve_claude_cli_path
+from notebook_intelligence._claude_cli import (
+    redact_argv_for_log as _redact_argv_for_log,
+    reject_flag_smuggling,
+    run_claude_cli,
+)
 
 log = logging.getLogger(__name__)
 
@@ -38,47 +42,6 @@ CLI_TIMEOUT_SECONDS = 60.0
 # Marketplace-add fetches the source over the network (git clone, HTTPS
 # manifest pull) so it can outlast the default budget on slow links.
 CLI_TIMEOUT_MARKETPLACE_ADD_SECONDS = 120.0
-
-# Plugin / command / source values must not start with `-` so they can't be
-# parsed as flags through their position in argv.
-def _reject_flag_smuggling(label: str, value: str) -> None:
-    if value.startswith("-"):
-        raise ValueError(f"Invalid {label} {value!r}: leading '-' is not permitted")
-
-
-# Flags whose value should never appear in logs. Includes the documented
-# secret-bearing flags from `claude mcp add --help` even though plugin
-# CLIs don't currently use all of them — the cost of a forward-compat
-# entry is negligible vs an accidental leak.
-_SECRET_BEARING_FLAGS = frozenset(
-    [
-        "-e",
-        "--env",
-        "-H",
-        "--header",
-        "--client-secret",
-        "--client-id",
-        "--token",
-        "--password",
-        "--auth",
-        "--bearer",
-    ]
-)
-
-
-def _redact_argv_for_log(argv: list[str]) -> list[str]:
-    """Drop secret-bearing values for logs. Used by both managers."""
-    redacted: list[str] = []
-    skip_next = False
-    for token in argv:
-        if skip_next:
-            redacted.append("<redacted>")
-            skip_next = False
-            continue
-        redacted.append(token)
-        if token in _SECRET_BEARING_FLAGS:
-            skip_next = True
-    return redacted
 
 
 _GITHUB_URL_SCHEMES = ("http://", "https://", "git://", "ssh://")
@@ -157,13 +120,11 @@ class PluginManager:
     # --- reads ---------------------------------------------------------
 
     async def list_plugins(self) -> list[dict[str, Any]]:
-        out = await self._run_cli(self._cli_argv(["plugin", "list", "--json"]))
+        out = await self._run_cli(["plugin", "list", "--json"])
         return self._parse_json_array(out, "plugin list")
 
     async def list_marketplaces(self) -> list[dict[str, Any]]:
-        out = await self._run_cli(
-            self._cli_argv(["plugin", "marketplace", "list", "--json"])
-        )
+        out = await self._run_cli(["plugin", "marketplace", "list", "--json"])
         return self._parse_json_array(out, "plugin marketplace list")
 
     # --- writes (CLI shell-outs) ---------------------------------------
@@ -175,11 +136,9 @@ class PluginManager:
             raise ValueError(f"Invalid scope {scope!r}; expected one of {VALID_SCOPES}")
         if not plugin:
             raise ValueError("Missing plugin reference")
-        _reject_flag_smuggling("plugin", plugin)
+        reject_flag_smuggling("plugin", plugin)
         async with self._write_lock:
-            await self._run_cli(
-                self._cli_argv(["plugin", "install", "--scope", scope, plugin])
-            )
+            await self._run_cli(["plugin", "install", "--scope", scope, plugin])
 
     async def uninstall_plugin(
         self, *, plugin: str, scope: PluginScope = "user"
@@ -188,14 +147,12 @@ class PluginManager:
             raise ValueError(f"Invalid scope {scope!r}; expected one of {VALID_SCOPES}")
         if not plugin:
             raise ValueError("Missing plugin reference")
-        _reject_flag_smuggling("plugin", plugin)
+        reject_flag_smuggling("plugin", plugin)
         async with self._write_lock:
             # `-y` skips the prune-confirmation prompt that the CLI requires
             # when stdin isn't a TTY (we're explicitly closing stdin).
             await self._run_cli(
-                self._cli_argv(
-                    ["plugin", "uninstall", "--scope", scope, "-y", plugin]
-                )
+                ["plugin", "uninstall", "--scope", scope, "-y", plugin]
             )
 
     async def set_plugin_enabled(
@@ -205,13 +162,13 @@ class PluginManager:
             raise ValueError("Missing plugin reference")
         if scope is not None and scope not in VALID_SCOPES:
             raise ValueError(f"Invalid scope {scope!r}; expected one of {VALID_SCOPES}")
-        _reject_flag_smuggling("plugin", plugin)
-        argv = ["plugin", "enable" if enabled else "disable"]
+        reject_flag_smuggling("plugin", plugin)
+        tail = ["plugin", "enable" if enabled else "disable"]
         if scope is not None:
-            argv.extend(["--scope", scope])
-        argv.append(plugin)
+            tail.extend(["--scope", scope])
+        tail.append(plugin)
         async with self._write_lock:
-            await self._run_cli(self._cli_argv(argv))
+            await self._run_cli(tail)
 
     async def add_marketplace(
         self,
@@ -224,7 +181,7 @@ class PluginManager:
             raise ValueError(f"Invalid scope {scope!r}; expected one of {VALID_SCOPES}")
         if not source:
             raise ValueError("Missing marketplace source")
-        _reject_flag_smuggling("source", source)
+        reject_flag_smuggling("source", source)
         if not is_acceptable_marketplace_source(source):
             raise ValueError(
                 f"Invalid marketplace source {source!r}: only https://, "
@@ -238,30 +195,18 @@ class PluginManager:
             )
         async with self._write_lock:
             await self._run_cli(
-                self._cli_argv(
-                    ["plugin", "marketplace", "add", "--scope", scope, source]
-                ),
+                ["plugin", "marketplace", "add", "--scope", scope, source],
                 timeout=CLI_TIMEOUT_MARKETPLACE_ADD_SECONDS,
             )
 
     async def remove_marketplace(self, *, name: str) -> None:
         if not name:
             raise ValueError("Missing marketplace name")
-        _reject_flag_smuggling("name", name)
+        reject_flag_smuggling("name", name)
         async with self._write_lock:
-            await self._run_cli(
-                self._cli_argv(["plugin", "marketplace", "remove", name])
-            )
+            await self._run_cli(["plugin", "marketplace", "remove", name])
 
     # --- internals -----------------------------------------------------
-
-    def _cli_argv(self, tail: list[str]) -> list[str]:
-        cli = resolve_claude_cli_path()
-        if not cli:
-            raise FileNotFoundError(
-                "Claude Code CLI not found on PATH (set NBI_CLAUDE_CLI_PATH or install `claude`)"
-            )
-        return [cli, *tail]
 
     # Keys we'll walk to find an array of objects when the CLI returns a
     # wrapper shape. Tolerates the documented `{"installed": [...]}` form
@@ -292,31 +237,6 @@ class PluginManager:
         )
 
     async def _run_cli(
-        self, argv: list[str], *, timeout: float = CLI_TIMEOUT_SECONDS
+        self, tail: list[str], *, timeout: float = CLI_TIMEOUT_SECONDS
     ) -> str:
-        log.info(
-            "claude plugin invocation: %s",
-            " ".join(_redact_argv_for_log(argv[1:])),
-        )
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise TimeoutError(
-                f"`claude plugin` timed out after {timeout}s"
-            )
-        out = stdout.decode("utf-8", errors="replace")
-        err = stderr.decode("utf-8", errors="replace")
-        if proc.returncode != 0:
-            msg = (err or out).strip() or f"claude plugin failed (exit {proc.returncode})"
-            raise ValueError(msg)
-        return out
+        return await run_claude_cli(tail, timeout=timeout, label="claude plugin")

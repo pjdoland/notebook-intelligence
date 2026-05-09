@@ -23,7 +23,7 @@ from notebook_intelligence.plugin_manager import (
 @pytest.fixture
 def fake_cli(monkeypatch):
     monkeypatch.setattr(
-        "notebook_intelligence.plugin_manager.resolve_claude_cli_path",
+        "notebook_intelligence._claude_cli.resolve_claude_cli_path",
         lambda: "/usr/local/bin/claude",
     )
 
@@ -285,7 +285,7 @@ class TestPluginManagerWrites:
         ]
 
     def test_cli_failure_raises_with_stderr(self, fake_cli, monkeypatch):
-        async def fake_subprocess(*argv, stdin, stdout, stderr):
+        async def fake_subprocess(*argv, **kwargs):
             proc = MagicMock()
 
             async def communicate():
@@ -302,7 +302,7 @@ class TestPluginManagerWrites:
 
     def test_missing_cli_raises_filenotfound(self, monkeypatch):
         monkeypatch.setattr(
-            "notebook_intelligence.plugin_manager.resolve_claude_cli_path",
+            "notebook_intelligence._claude_cli.resolve_claude_cli_path",
             lambda: None,
         )
         manager = PluginManager()
@@ -386,44 +386,6 @@ class TestRedactArgvForLog:
         ]
 
 
-class TestPluginsManagementPolicyGate:
-    @staticmethod
-    def _run_prepare(handler):
-        from jupyter_server.base.handlers import APIHandler
-
-        async def _noop(_self):
-            return None
-
-        with patch.object(APIHandler, "prepare", _noop):
-            asyncio.run(PluginsBaseHandler.prepare(handler))
-
-    def test_default_attribute_allows(self):
-        assert PluginsBaseHandler.plugins_management_enabled is True
-
-    def test_prepare_rejects_when_disabled(self):
-        handler = MagicMock(spec=PluginsListHandler)
-        handler._finished = False
-        handler.policy_enabled_attr = "plugins_management_enabled"
-        handler.policy_disabled_message = (
-            "Plugins management is disabled by your administrator"
-        )
-        handler.plugins_management_enabled = False
-
-        def _finish(payload):
-            handler._finished = True
-            handler._finish_payload = payload
-
-        handler.finish.side_effect = _finish
-        self._run_prepare(handler)
-        handler.set_status.assert_called_with(403)
-        body = json.loads(handler._finish_payload)
-        assert "administrator" in body["error"].lower()
-
-    def test_prepare_passes_when_enabled(self):
-        handler = MagicMock(spec=PluginsListHandler)
-        handler._finished = False
-        handler.policy_enabled_attr = "plugins_management_enabled"
-        handler.plugins_management_enabled = True
-        self._run_prepare(handler)
-        handler.set_status.assert_not_called()
-        handler.finish.assert_not_called()
+# Per-family policy-gate coverage lives in `tests/test_policy_gate.py`,
+# parametrized across SkillsBaseHandler / ClaudeMCPBaseHandler /
+# PluginsBaseHandler.
