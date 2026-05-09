@@ -361,6 +361,10 @@ class TestClaudeMCPManagementPolicyGate:
     def test_prepare_rejects_when_disabled(self):
         handler = MagicMock(spec=ClaudeMCPListHandler)
         handler._finished = False
+        handler.policy_enabled_attr = "claude_mcp_management_enabled"
+        handler.policy_disabled_message = (
+            "Claude MCP management is disabled by your administrator"
+        )
         handler.claude_mcp_management_enabled = False
 
         def _finish(payload):
@@ -376,6 +380,7 @@ class TestClaudeMCPManagementPolicyGate:
     def test_prepare_passes_when_enabled(self):
         handler = MagicMock(spec=ClaudeMCPListHandler)
         handler._finished = False
+        handler.policy_enabled_attr = "claude_mcp_management_enabled"
         handler.claude_mcp_management_enabled = True
         self._run_prepare(handler)
         handler.set_status.assert_not_called()

@@ -553,6 +553,10 @@ class TestSkillsManagementPolicyGate:
     def test_prepare_rejects_when_disabled(self):
         handler = MagicMock(spec=SkillsListHandler)
         handler._finished = False
+        handler.policy_enabled_attr = "skills_management_enabled"
+        handler.policy_disabled_message = (
+            "Skills management is disabled by your administrator"
+        )
         handler.skills_management_enabled = False
 
         def _finish(payload):
@@ -568,6 +572,7 @@ class TestSkillsManagementPolicyGate:
     def test_prepare_passes_when_enabled(self):
         handler = MagicMock(spec=SkillsListHandler)
         handler._finished = False
+        handler.policy_enabled_attr = "skills_management_enabled"
         handler.skills_management_enabled = True
         self._run_prepare(handler)
         handler.set_status.assert_not_called()

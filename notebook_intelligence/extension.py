@@ -43,6 +43,7 @@ from notebook_intelligence.feature_flags import (
 )
 from notebook_intelligence.claude import ClaudeCodeChatParticipant, fetch_claude_models
 from notebook_intelligence.claude_mcp_manager import ClaudeMCPManager
+from notebook_intelligence.plugin_manager import PluginManager
 from notebook_intelligence.claude_sessions import (
     NBI_CONTEXT_PREFIX,
     get_sessions_dir as get_claude_sessions_dir,
@@ -244,6 +245,11 @@ FEATURE_POLICY_SPEC = (
         "NBI_CLAUDE_MCP_MANAGEMENT_POLICY",
         "claude_mcp_management_policy",
     ),
+    (
+        "plugins_management",
+        "NBI_PLUGINS_MANAGEMENT_POLICY",
+        "plugins_management_policy",
+    ),
 )
 FEATURE_POLICY_NAMES = tuple(name for name, _, _ in FEATURE_POLICY_SPEC)
 
@@ -291,6 +297,7 @@ def _build_feature_policies_response(policies: dict, nbi_config) -> dict:
         # The policy resolver still applies force-off / force-on correctly.
         "skills_management": True,
         "claude_mcp_management": True,
+        "plugins_management": True,
     }
 
     response = {}
@@ -336,6 +343,7 @@ class GetCapabilitiesHandler(APIHandler):
     enable_chat_feedback = False
     allow_github_skill_import = True
     additional_skipped_workspace_directories = []
+    allow_github_plugin_import = True
     feature_policies = {}
     string_overrides = {}
 
@@ -424,6 +432,7 @@ class GetCapabilitiesHandler(APIHandler):
             "chat_feedback_enabled": self.enable_chat_feedback,
             "allow_github_skill_import": self.allow_github_skill_import,
             "additional_skipped_workspace_directories": self.additional_skipped_workspace_directories,
+            "allow_github_plugin_import": self.allow_github_plugin_import,
             "cell_output_features": _build_cell_output_features_response(
                 self.feature_policies.get("explain_error", POLICY_USER_CHOICE),
                 self.feature_policies.get("output_followup", POLICY_USER_CHOICE),
@@ -710,26 +719,28 @@ class RulesReloadHandler(APIHandler):
             self.finish(json.dumps({"error": str(e)}))
 
 
-class ClaudeMCPBaseHandler(APIHandler):
-    """Shared helpers + policy gate for Claude-MCP endpoints."""
+class PolicyGatedHandler(APIHandler):
+    """APIHandler that short-circuits with 403 in `prepare()` when the
+    associated admin policy is force-off.
 
-    claude_mcp_management_enabled = True
+    Subclasses set ``policy_enabled_attr`` to the class-attribute name that
+    holds the resolved bool (set in ``_setup_handlers``), and
+    ``policy_disabled_message`` for the user-facing error string.
+    """
+
+    policy_enabled_attr: str = ""
+    policy_disabled_message: str = "This feature is disabled by your administrator"
 
     async def prepare(self):
-        # Mirrors SkillsBaseHandler.prepare — see there for the rationale on
-        # awaiting super() and checking _finished.
+        # APIHandler.prepare is async (xsrf/auth); must await before applying
+        # the policy gate.
         await super().prepare()
         if self._finished:
             return
-        if not self.claude_mcp_management_enabled:
+        attr = self.policy_enabled_attr
+        if attr and not getattr(self, attr, True):
             self.set_status(403)
-            self.finish(
-                json.dumps({"error": "Claude MCP management is disabled by your administrator"})
-            )
-
-    @property
-    def manager(self) -> "ClaudeMCPManager":
-        return ClaudeMCPManager(working_dir=get_jupyter_root_dir() or None)
+            self.finish(json.dumps({"error": self.policy_disabled_message}))
 
     def _parse_json_body(self):
         try:
@@ -738,6 +749,18 @@ class ClaudeMCPBaseHandler(APIHandler):
             self.set_status(400)
             self.finish(json.dumps({"error": f"Invalid JSON: {e}"}))
             return None
+
+
+class ClaudeMCPBaseHandler(PolicyGatedHandler):
+    """Shared helpers + policy gate for Claude-MCP endpoints."""
+
+    claude_mcp_management_enabled = True
+    policy_enabled_attr = "claude_mcp_management_enabled"
+    policy_disabled_message = "Claude MCP management is disabled by your administrator"
+
+    @property
+    def manager(self) -> "ClaudeMCPManager":
+        return ClaudeMCPManager(working_dir=get_jupyter_root_dir() or None)
 
     def _error(self, exc: Exception):
         if isinstance(exc, FileNotFoundError):
@@ -800,23 +823,135 @@ class ClaudeMCPDetailHandler(ClaudeMCPBaseHandler):
             self._error(e)
 
 
-class SkillsBaseHandler(APIHandler):
+class PluginsBaseHandler(PolicyGatedHandler):
+    """Shared helpers + policy gate for plugin endpoints."""
+
+    plugins_management_enabled = True
+    policy_enabled_attr = "plugins_management_enabled"
+    policy_disabled_message = "Plugins management is disabled by your administrator"
+
+    @property
+    def manager(self) -> "PluginManager":
+        return PluginManager()
+
+    def _error(self, exc: Exception):
+        if isinstance(exc, FileNotFoundError):
+            self.set_status(404)
+        elif isinstance(exc, PermissionError):
+            self.set_status(403)
+        elif isinstance(exc, TimeoutError):
+            self.set_status(504)
+        else:
+            self.set_status(400)
+        self.finish(json.dumps({"error": str(exc)}))
+
+
+class PluginsListHandler(PluginsBaseHandler):
+    @tornado.web.authenticated
+    async def get(self):
+        try:
+            plugins = await self.manager.list_plugins()
+        except (FileNotFoundError, TimeoutError, ValueError) as e:
+            self._error(e)
+            return
+        self.finish(json.dumps({"plugins": plugins}))
+
+    @tornado.web.authenticated
+    async def post(self):
+        data = self._parse_json_body()
+        if data is None:
+            return
+        try:
+            await self.manager.install_plugin(
+                plugin=data.get("plugin", ""),
+                scope=data.get("scope", "user"),
+            )
+            self.finish(json.dumps({"success": True}))
+        except (FileNotFoundError, TimeoutError, ValueError) as e:
+            self._error(e)
+
+
+class PluginsDetailHandler(PluginsBaseHandler):
+    @tornado.web.authenticated
+    async def delete(self, scope, plugin):
+        try:
+            await self.manager.uninstall_plugin(plugin=plugin, scope=scope)
+            self.finish(json.dumps({"success": True}))
+        except (FileNotFoundError, TimeoutError, ValueError) as e:
+            self._error(e)
+
+    @tornado.web.authenticated
+    async def post(self, scope, plugin):
+        # Body: {"action": "enable" | "disable"}.
+        data = self._parse_json_body()
+        if data is None:
+            return
+        action = data.get("action")
+        if action not in ("enable", "disable"):
+            self.set_status(400)
+            self.finish(json.dumps({
+                "error": "Missing or invalid 'action' (must be 'enable' or 'disable')"
+            }))
+            return
+        try:
+            await self.manager.set_plugin_enabled(
+                plugin=plugin, enabled=action == "enable", scope=scope
+            )
+            self.finish(json.dumps({"success": True}))
+        except (FileNotFoundError, TimeoutError, ValueError) as e:
+            self._error(e)
+
+
+class PluginsMarketplaceListHandler(PluginsBaseHandler):
+    # Only the marketplace-add path needs the github gate; class-attribute
+    # lives here rather than on the base so unrelated handlers (list,
+    # uninstall, enable/disable) don't carry it.
+    allow_github_plugin_import = True
+
+    @tornado.web.authenticated
+    async def get(self):
+        try:
+            marketplaces = await self.manager.list_marketplaces()
+        except (FileNotFoundError, TimeoutError, ValueError) as e:
+            self._error(e)
+            return
+        self.finish(json.dumps({"marketplaces": marketplaces}))
+
+    @tornado.web.authenticated
+    async def post(self):
+        data = self._parse_json_body()
+        if data is None:
+            return
+        try:
+            await self.manager.add_marketplace(
+                source=data.get("source", ""),
+                scope=data.get("scope", "user"),
+                allow_github=bool(self.allow_github_plugin_import),
+            )
+            self.finish(json.dumps({"success": True}))
+        except PermissionError as e:
+            self._error(e)
+        except (FileNotFoundError, TimeoutError, ValueError) as e:
+            self._error(e)
+
+
+class PluginsMarketplaceDetailHandler(PluginsBaseHandler):
+    @tornado.web.authenticated
+    async def delete(self, name):
+        try:
+            await self.manager.remove_marketplace(name=name)
+            self.finish(json.dumps({"success": True}))
+        except (FileNotFoundError, TimeoutError, ValueError) as e:
+            self._error(e)
+
+
+class SkillsBaseHandler(PolicyGatedHandler):
     """Shared helpers for skills endpoints."""
 
     allow_github_skill_import = True
     skills_management_enabled = True
-
-    async def prepare(self):
-        # APIHandler.prepare is async (xsrf/auth), so we must await it before
-        # applying the skills_management policy gate.
-        await super().prepare()
-        if self._finished:
-            return
-        if not self.skills_management_enabled:
-            self.set_status(403)
-            self.finish(
-                json.dumps({"error": "Skills management is disabled by your administrator"})
-            )
+    policy_enabled_attr = "skills_management_enabled"
+    policy_disabled_message = "Skills management is disabled by your administrator"
 
     @property
     def skill_manager(self):
@@ -2002,6 +2137,35 @@ class NotebookIntelligence(ExtensionApp):
         config=True,
     )
 
+    plugins_management_policy = TraitletEnum(
+        list(VALID_POLICIES),
+        default_value=POLICY_USER_CHOICE,
+        help="""
+        Org-wide policy for the Claude-mode Plugins management tab.
+        "user-choice" (default) and "force-on" both leave the tab visible
+        when Claude mode is on and the Claude CLI is available; the two are
+        behaviorally identical here (no user toggle to override). "force-off"
+        hides the tab and returns 403 from /plugins handlers. Overridden by
+        the NBI_PLUGINS_MANAGEMENT_POLICY env var.
+        """,
+        config=True,
+    )
+
+    allow_github_plugin_import = Bool(
+        default_value=True,
+        help="""
+        Allow adding plugin marketplaces from GitHub (URL or owner/repo
+        shorthand). Set False to hide the "From GitHub" affordance in the
+        plugins panel and reject backend marketplace-add requests whose
+        source string is a GitHub reference. Local-path and arbitrary-URL
+        sources remain available — this is a fine-grained gate paralleling
+        `allow_github_skill_import`. Overridden by the
+        NBI_ALLOW_GITHUB_PLUGIN_IMPORT env var.
+        """,
+        allow_none=True,
+        config=True,
+    )
+
     skills_manifest = Unicode(
         default_value="",
         help="""
@@ -2147,6 +2311,16 @@ class NotebookIntelligence(ExtensionApp):
         route_pattern_claude_mcp_detail = url_path_join(
             base_url, "notebook-intelligence", "claude-mcp", r"(user|project|local)", r"([^/]+)"
         )
+        route_pattern_plugins = url_path_join(base_url, "notebook-intelligence", "plugins")
+        route_pattern_plugins_detail = url_path_join(
+            base_url, "notebook-intelligence", "plugins", r"(user|project|local)", r"([^/]+)"
+        )
+        route_pattern_plugins_marketplace = url_path_join(
+            base_url, "notebook-intelligence", "plugins", "marketplace"
+        )
+        route_pattern_plugins_marketplace_detail = url_path_join(
+            base_url, "notebook-intelligence", "plugins", "marketplace", r"([^/]+)"
+        )
         GetCapabilitiesHandler.disabled_tools = self.disabled_tools
         GetCapabilitiesHandler.allow_enabling_tools_with_env = self.allow_enabling_tools_with_env
         GetCapabilitiesHandler.disabled_providers = self.disabled_providers
@@ -2169,6 +2343,22 @@ class NotebookIntelligence(ExtensionApp):
         ClaudeMCPBaseHandler.claude_mcp_management_enabled = not is_force_off(
             feature_policies, "claude_mcp_management"
         )
+        PluginsBaseHandler.plugins_management_enabled = not is_force_off(
+            feature_policies, "plugins_management"
+        )
+        env_allow_gh_plugin = os.environ.get(
+            "NBI_ALLOW_GITHUB_PLUGIN_IMPORT", ""
+        ).strip().lower()
+        if env_allow_gh_plugin in ("true", "1", "yes", "on"):
+            allow_github_plugin_import = True
+        elif env_allow_gh_plugin in ("false", "0", "no", "off"):
+            allow_github_plugin_import = False
+        else:
+            allow_github_plugin_import = bool(self.allow_github_plugin_import)
+        PluginsMarketplaceListHandler.allow_github_plugin_import = allow_github_plugin_import
+        # Mirror onto GetCapabilitiesHandler so the frontend can hide the
+        # "From GitHub" affordance — both handlers see the same resolved value.
+        GetCapabilitiesHandler.allow_github_plugin_import = allow_github_plugin_import
         self._publish_policies(feature_policies, string_overrides)
         NotebookIntelligence.handlers = [
             (route_pattern_capabilities, GetCapabilitiesHandler),
@@ -2202,6 +2392,12 @@ class NotebookIntelligence(ExtensionApp):
             # shadow specialized URLs added later (parallels the skills order).
             (route_pattern_claude_mcp_detail, ClaudeMCPDetailHandler),
             (route_pattern_claude_mcp, ClaudeMCPListHandler),
+            # Plugin routes: marketplace endpoints before the {scope}/{plugin}
+            # catch-all so the literal "marketplace" segment isn't eaten.
+            (route_pattern_plugins_marketplace_detail, PluginsMarketplaceDetailHandler),
+            (route_pattern_plugins_marketplace, PluginsMarketplaceListHandler),
+            (route_pattern_plugins_detail, PluginsDetailHandler),
+            (route_pattern_plugins, PluginsListHandler),
             (route_pattern_copilot, WebsocketCopilotHandler),
         ]
         web_app.add_handlers(host_pattern, NotebookIntelligence.handlers)

@@ -136,13 +136,16 @@ def _gather_from_dict(
 
 
 class ClaudeMCPManager:
+    # Class-level so the lock is shared across all ClaudeMCPManager instances
+    # within this process. Handlers construct a fresh manager per request,
+    # so an instance lock wouldn't actually serialize anything. Claude's
+    # CLI does read-modify-write on `~/.claude.json` without a lockfile, so
+    # two in-flight `add`s from the same NBI server can clobber.
+    _write_lock = asyncio.Lock()
+
     def __init__(self, working_dir: Optional[str] = None):
         self._working_dir = Path(working_dir) if working_dir else Path.cwd()
         self._user_config_path = Path.home() / ".claude.json"
-        # Serialize CLI writes within this process. Claude's CLI does
-        # read-modify-write on `~/.claude.json` without a lockfile, so two
-        # in-flight `add`s from the same NBI server can clobber.
-        self._write_lock = asyncio.Lock()
 
     # --- reads ---------------------------------------------------------
 

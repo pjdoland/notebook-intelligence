@@ -19,6 +19,7 @@ import { PillItem } from './pill';
 import { mcpServerSettingsToEnabledState } from './mcp-util';
 import { SettingsPanelComponentSkills } from './skills-panel';
 import { SettingsPanelComponentClaudeMCP } from './claude-mcp-panel';
+import { SettingsPanelComponentPlugins } from './plugins-panel';
 import { writeTextToClipboard } from '../utils';
 
 const lockedTip = (locked: boolean): string =>
@@ -149,6 +150,10 @@ function SettingsPanelComponent(props: any) {
     featurePolicies.claude_mcp_management.enabled &&
     isInClaudeCodeMode &&
     isClaudeCliAvailable;
+  const pluginsTabVisible =
+    featurePolicies.plugins_management.enabled &&
+    isInClaudeCodeMode &&
+    isClaudeCliAvailable;
 
   // Bounce the user off a tab that has just been hidden by an admin policy
   // change so they don't see a blank pane.
@@ -159,7 +164,10 @@ function SettingsPanelComponent(props: any) {
     if (!claudeMcpTabVisible && activeTab === 'claude-mcp') {
       setActiveTab('general');
     }
-  }, [skillsTabVisible, claudeMcpTabVisible, activeTab]);
+    if (!pluginsTabVisible && activeTab === 'plugins') {
+      setActiveTab('general');
+    }
+  }, [skillsTabVisible, claudeMcpTabVisible, pluginsTabVisible, activeTab]);
 
   const onTabSelected = (tab: string) => {
     setActiveTab(tab);
@@ -172,6 +180,7 @@ function SettingsPanelComponent(props: any) {
         activeTab={activeTab}
         skillsTabVisible={skillsTabVisible}
         claudeMcpTabVisible={claudeMcpTabVisible}
+        pluginsTabVisible={pluginsTabVisible}
       />
       <div
         className="nbi-settings-panel-tab-content"
@@ -200,6 +209,9 @@ function SettingsPanelComponent(props: any) {
         )}
         {activeTab === 'claude-mcp' && claudeMcpTabVisible && (
           <SettingsPanelComponentClaudeMCP />
+        )}
+        {activeTab === 'plugins' && pluginsTabVisible && (
+          <SettingsPanelComponentPlugins />
         )}
       </div>
     </div>
@@ -247,6 +259,9 @@ function SettingsPanelTabsComponent(props: any) {
   }
   if (props.claudeMcpTabVisible) {
     tabs.push({ id: 'claude-mcp', label: 'Claude MCP' });
+  }
+  if (props.pluginsTabVisible) {
+    tabs.push({ id: 'plugins', label: 'Plugins' });
   }
   if (props.skillsTabVisible) {
     tabs.push({ id: 'skills', label: 'Skills' });
