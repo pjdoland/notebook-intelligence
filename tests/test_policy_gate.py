@@ -44,9 +44,9 @@ HANDLER_FAMILIES = [
     pytest.param(
         PluginsBaseHandler,
         PluginsListHandler,
-        "plugins_management_enabled",
+        "claude_plugins_management_enabled",
         "Plugins management is disabled by your administrator",
-        id="plugins",
+        id="claude_plugins",
     ),
 ]
 

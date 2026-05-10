@@ -261,9 +261,9 @@ FEATURE_POLICY_SPEC = (
         "claude_mcp_management_policy",
     ),
     (
-        "plugins_management",
-        "NBI_PLUGINS_MANAGEMENT_POLICY",
-        "plugins_management_policy",
+        "claude_plugins_management",
+        "NBI_CLAUDE_PLUGINS_MANAGEMENT_POLICY",
+        "claude_plugins_management_policy",
     ),
 )
 FEATURE_POLICY_NAMES = tuple(name for name, _, _ in FEATURE_POLICY_SPEC)
@@ -312,7 +312,7 @@ def _build_feature_policies_response(policies: dict, nbi_config) -> dict:
         # The policy resolver still applies force-off / force-on correctly.
         "skills_management": True,
         "claude_mcp_management": True,
-        "plugins_management": True,
+        "claude_plugins_management": True,
     }
 
     response = {}
@@ -872,8 +872,8 @@ class ClaudeMCPDetailHandler(ClaudeMCPBaseHandler):
 class PluginsBaseHandler(PolicyGatedHandler):
     """Shared helpers + policy gate for plugin endpoints."""
 
-    plugins_management_enabled = True
-    policy_enabled_attr = "plugins_management_enabled"
+    claude_plugins_management_enabled = True
+    policy_enabled_attr = "claude_plugins_management_enabled"
     policy_disabled_message = "Plugins management is disabled by your administrator"
     exception_status_map = {
         FileNotFoundError: 404,
@@ -2166,7 +2166,7 @@ class NotebookIntelligence(ExtensionApp):
         config=True,
     )
 
-    plugins_management_policy = TraitletEnum(
+    claude_plugins_management_policy = TraitletEnum(
         list(VALID_POLICIES),
         default_value=POLICY_USER_CHOICE,
         help="""
@@ -2175,7 +2175,9 @@ class NotebookIntelligence(ExtensionApp):
         when Claude mode is on and the Claude CLI is available; the two are
         behaviorally identical here (no user toggle to override). "force-off"
         hides the tab and returns 403 from /plugins handlers. Overridden by
-        the NBI_PLUGINS_MANAGEMENT_POLICY env var.
+        the NBI_CLAUDE_PLUGINS_MANAGEMENT_POLICY env var. Mirrors the
+        `claude_` prefix on `claude_mcp_management_policy` since both gate
+        Claude-only management surfaces.
         """,
         config=True,
     )
@@ -2372,8 +2374,8 @@ class NotebookIntelligence(ExtensionApp):
         ClaudeMCPBaseHandler.claude_mcp_management_enabled = not is_force_off(
             feature_policies, "claude_mcp_management"
         )
-        PluginsBaseHandler.plugins_management_enabled = not is_force_off(
-            feature_policies, "plugins_management"
+        PluginsBaseHandler.claude_plugins_management_enabled = not is_force_off(
+            feature_policies, "claude_plugins_management"
         )
         env_allow_gh_plugin = os.environ.get(
             "NBI_ALLOW_GITHUB_PLUGIN_IMPORT", ""

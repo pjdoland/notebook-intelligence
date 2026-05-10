@@ -192,7 +192,7 @@ const TABS: TabSpec[] = [
     id: 'plugins',
     label: 'Plugins',
     visible: ctx =>
-      ctx.featurePolicies.plugins_management.enabled &&
+      ctx.featurePolicies.claude_plugins_management.enabled &&
       ctx.isInClaudeCodeMode &&
       ctx.isClaudeCliAvailable,
     render: () => <SettingsPanelComponentPlugins />

@@ -395,10 +395,10 @@ Reads come from Claude's JSON config files directly (fast, no health checks). Wr
 ### Disabling the Plugins tab
 
 ```python
-c.NotebookIntelligence.plugins_management_policy = "force-off"
+c.NotebookIntelligence.claude_plugins_management_policy = "force-off"
 ```
 
-Or via env: `NBI_PLUGINS_MANAGEMENT_POLICY=force-off`.
+Or via env: `NBI_CLAUDE_PLUGINS_MANAGEMENT_POLICY=force-off`.
 
 Force-off hides the **Plugins** tab and returns 403 from every `/notebook-intelligence/plugins/*` route. The tab is otherwise visible only when Claude mode is on and the `claude` CLI is available. Both reads (`claude plugin list --json`) and writes (`claude plugin install` / `uninstall` / `enable` / `disable` / `marketplace add` / `marketplace remove`) shell out to the Claude CLI; Claude owns the plugin state under `~/.claude/plugins/`.
 
@@ -410,9 +410,9 @@ To allow user-driven plugin management but block GitHub-sourced marketplaces:
 c.NotebookIntelligence.allow_github_plugin_import = False
 ```
 
-Or via env: `NBI_ALLOW_GITHUB_PLUGIN_IMPORT=false` (also accepts `true`/`1`/`0`/`yes`/`no`/`on`/`off`). When False, the "From GitHub" affordance in the Plugins panel hides itself and the backend rejects marketplace-add requests whose source is a GitHub URL, `owner/repo` shorthand, or `git@github.com:` reference. Local-path and arbitrary-URL sources remain available. This is finer-grained than `plugins_management_policy = force-off`, which kills the entire surface.
+Or via env: `NBI_ALLOW_GITHUB_PLUGIN_IMPORT=false` (also accepts `true`/`1`/`0`/`yes`/`no`/`on`/`off`). When False, the "From GitHub" affordance in the Plugins panel hides itself and the backend rejects marketplace-add requests whose source is a GitHub URL, `owner/repo` shorthand, or `git@github.com:` reference. Local-path and arbitrary-URL sources remain available. This is finer-grained than `claude_plugins_management_policy = force-off`, which kills the entire surface.
 
-> **Trust model.** Plugins installed via `claude plugin install` execute as part of Claude Code sessions; NBI does not signature-verify or sandbox them, and the `claude` CLI's validation is best-effort. The marketplace-add path is a network fetch (server-side) — for multi-tenant or regulated deployments, default to `plugins_management_policy = force-off` and curate plugins server-side, or restrict marketplaces to vetted sources only.
+> **Trust model.** Plugins installed via `claude plugin install` execute as part of Claude Code sessions; NBI does not signature-verify or sandbox them, and the `claude` CLI's validation is best-effort. The marketplace-add path is a network fetch (server-side) — for multi-tenant or regulated deployments, default to `claude_plugins_management_policy = force-off` and curate plugins server-side, or restrict marketplaces to vetted sources only.
 
 #### GitHub auth for marketplace add
 

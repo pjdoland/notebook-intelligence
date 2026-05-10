@@ -237,7 +237,7 @@ export type FeaturePolicyName =
   | 'store_github_access_token'
   | 'skills_management'
   | 'claude_mcp_management'
-  | 'plugins_management';
+  | 'claude_plugins_management';
 
 export type IFeaturePolicies = Record<
   FeaturePolicyName,
@@ -408,7 +408,7 @@ export class NBIConfig {
       'store_github_access_token',
       'skills_management',
       'claude_mcp_management',
-      'plugins_management'
+      'claude_plugins_management'
     ];
     // Admin-only management gates (no per-user toggle) default *open* when
     // missing — a new frontend hitting an older backend without these
@@ -418,7 +418,7 @@ export class NBIConfig {
     const defaultOpen: ReadonlySet<FeaturePolicyName> = new Set([
       'skills_management',
       'claude_mcp_management',
-      'plugins_management'
+      'claude_plugins_management'
     ]);
     const result = {} as IFeaturePolicies;
     for (const name of names) {
