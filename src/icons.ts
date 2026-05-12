@@ -10,6 +10,7 @@
 // bump of @types/react to v19+ only requires deleting this shim.
 
 import type { FC, SVGAttributes } from 'react';
+import type { IconType } from 'react-icons/lib';
 import * as Md from 'react-icons/md';
 import * as Vsc from 'react-icons/vsc';
 
@@ -21,7 +22,12 @@ interface IIconBaseProps extends SVGAttributes<SVGElement> {
 
 type IconLike = FC<IIconBaseProps>;
 
-const asIcon = (Component: unknown) => Component as IconLike;
+// Typed parameter (IconType, the upstream signature) so a typo in
+// `Vsc.VscFooo` is caught at compile time. The `unknown` indirection
+// is what the TS error message asks for when widening a return type
+// across the React 18 → React 19 ReactNode boundary.
+const asIcon = (Component: IconType): IconLike =>
+  Component as unknown as IconLike;
 
 export const VscAdd = asIcon(Vsc.VscAdd);
 export const VscArrowDown = asIcon(Vsc.VscArrowDown);
