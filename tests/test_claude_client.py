@@ -1184,3 +1184,40 @@ class TestExtractTextFromContent:
     def test_list_with_non_dict_entries_skipped(self):
         content = [{"type": "text", "text": "valid"}, "raw string", None]
         assert _extract_text_from_content(content) == "valid"
+
+
+class TestParticipantCommandsDedupe:
+    """`ClaudeCodeChatParticipant.commands` merges NBI built-ins with SDK
+    server_info commands. When the SDK now lists a name NBI also ships
+    (e.g. `/clear`), the slash must appear once in @-autocomplete."""
+
+    def test_clear_not_duplicated_when_sdk_lists_it(self):
+        participant = _make_participant()
+        participant._client.server_info = {
+            "commands": [
+                {"name": "clear", "description": "Claude SDK clear"},
+                {"name": "compact", "description": "Compact chat history"},
+            ]
+        }
+        names = [cmd.name for cmd in participant.commands]
+        assert names.count("clear") == 1
+        # SDK description wins when both sources collide.
+        clear = next(cmd for cmd in participant.commands if cmd.name == "clear")
+        assert clear.description == "Claude SDK clear"
+        assert "compact" in names
+
+    def test_sdk_commands_appended_when_no_collision(self):
+        participant = _make_participant()
+        participant._client.server_info = {
+            "commands": [
+                {"name": "cost", "description": "Show cost"},
+            ]
+        }
+        names = [cmd.name for cmd in participant.commands]
+        assert names == ["clear", "cost"]
+
+    def test_fallback_when_server_info_missing(self):
+        participant = _make_participant()
+        participant._client.server_info = None
+        names = [cmd.name for cmd in participant.commands]
+        assert names == ["compact", "context", "cost", "clear"]

@@ -1128,22 +1128,29 @@ class ClaudeCodeChatParticipant(BaseChatParticipant):
     
     @property
     def commands(self) -> list[ChatCommand]:
-        participant_commands = [
-            ChatCommand(name='clear', description='Clear chat history')
+        # Dedupe by name so a command the Claude SDK now ships as a
+        # built-in (e.g. `/clear`) doesn't appear twice in the @-mention
+        # autocomplete. SDK-provided commands win the description when
+        # both sources list the same name.
+        nbi_built_ins = [
+            ChatCommand(name='clear', description='Clear chat history'),
         ]
         server_info = self._client.server_info
-        if server_info is not None:
-            commands = server_info.get('commands', [])
-            for command in commands:
-                participant_commands.append(ChatCommand(name=command['name'], description=command['description']))
-            return participant_commands
-        else:
+        if server_info is None:
             return [
                 ChatCommand(name='compact', description='Compact chat history'),
                 ChatCommand(name='context', description='Show context of the chat'),
                 ChatCommand(name='cost', description='Show cost of the chat'),
                 ChatCommand(name='clear', description='Clear chat history'),
             ]
+        commands_by_name: dict[str, ChatCommand] = {
+            cmd.name: cmd for cmd in nbi_built_ins
+        }
+        for command in server_info.get('commands', []):
+            commands_by_name[command['name']] = ChatCommand(
+                name=command['name'], description=command['description']
+            )
+        return list(commands_by_name.values())
 
     @property
     def websocket_connector(self) -> ThreadSafeWebSocketConnector:
