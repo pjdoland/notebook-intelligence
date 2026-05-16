@@ -3972,7 +3972,14 @@ function SidebarComponent(props: any) {
                   value={workspaceFileSearch}
                   onChange={event => setWorkspaceFileSearch(event.target.value)}
                   onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
-                    event.stopPropagation();
+                    // Let Escape bubble to the popover's Escape handler so
+                    // the dialog closes even when focus is in the search
+                    // input (issue #262). Other keys still stop here so the
+                    // chat sidebar's keyboard shortcuts don't fire while
+                    // the user is typing a filter.
+                    if (event.key !== 'Escape') {
+                      event.stopPropagation();
+                    }
                   }}
                 />
                 {workspaceFilesError && (
