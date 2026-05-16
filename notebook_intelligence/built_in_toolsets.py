@@ -72,7 +72,7 @@ async def get_number_of_cells(**args) -> str:
 @nbapi.auto_approve
 @nbapi.tool
 async def get_cell_type_and_source(cell_index: int, **args) -> str:
-    """Get cell type and source for the cell at index for the active notebook.
+    """Get cell type and source for the cell at zero-based index for the active notebook.
 
     Args:
         cell_index: Zero based cell index
@@ -86,7 +86,7 @@ async def get_cell_type_and_source(cell_index: int, **args) -> str:
 @nbapi.auto_approve
 @nbapi.tool
 async def get_cell_output(cell_index: int, **args) -> str:
-    """Get cell output for the cell at index for the active notebook.
+    """Get cell output for the cell at zero-based index for the active notebook.
 
     Args:
         cell_index: Zero based cell index
@@ -99,7 +99,7 @@ async def get_cell_output(cell_index: int, **args) -> str:
 @nbapi.auto_approve
 @nbapi.tool
 async def set_cell_type_and_source(cell_index: int, cell_type: str, source: str, **args) -> str:
-    """Set cell type and source for the cell at index for the active notebook.
+    """Set cell type and source for the cell at zero-based index for the active notebook.
 
     Args:
         cell_index: Zero based cell index
@@ -114,7 +114,7 @@ async def set_cell_type_and_source(cell_index: int, cell_type: str, source: str,
 @nbapi.auto_approve
 @nbapi.tool
 async def delete_cell(cell_index: int, **args) -> str:
-    """Delete the cell at index for the active notebook.
+    """Delete the cell at zero-based index for the active notebook.
 
     Args:
         cell_index: Zero based cell index
@@ -128,7 +128,7 @@ async def delete_cell(cell_index: int, **args) -> str:
 @nbapi.auto_approve
 @nbapi.tool
 async def insert_cell(cell_index: int, cell_type: str, source: str, **args) -> str:
-    """Insert cell with type and source at index for the active notebook.
+    """Insert cell with type and source at zero-based index for the active notebook.
 
     Args:
         cell_index: Zero based cell index
@@ -143,7 +143,7 @@ async def insert_cell(cell_index: int, cell_type: str, source: str, **args) -> s
 @nbapi.auto_approve
 @nbapi.tool
 async def run_cell(cell_index: int, **args) -> str:
-    """Run the cell at index for the active notebook.
+    """Run the cell at zero-based index for the active notebook.
 
     Args:
         cell_index: Zero based cell index

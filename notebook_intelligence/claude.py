@@ -979,7 +979,7 @@ async def get_number_of_cells(args) -> str:
 
     return tool_text_response(ui_cmd_response)
 
-@tool("get-cell-type-and-source", "Gets the type and source of the cell at index.", {"cell_index": int})
+@tool("get-cell-type-and-source", "Gets the type and source of the cell at zero-based index.", {"cell_index": int})
 async def get_cell_type_and_source(args) -> str:
     """Get cell type and source for the cell at index for the active notebook.
 
@@ -992,7 +992,7 @@ async def get_cell_type_and_source(args) -> str:
     return tool_text_response(ui_cmd_response)
 
 
-@tool("get-cell-output", "Gets the output of the cell at index.", {"cell_index": int})
+@tool("get-cell-output", "Gets the output of the cell at zero-based index.", {"cell_index": int})
 async def get_cell_output(args) -> str:
     """Get cell output for the cell at index for the active notebook.
 
@@ -1004,7 +1004,7 @@ async def get_cell_output(args) -> str:
 
     return tool_text_response(ui_cmd_response)
 
-@tool("set-cell-type-and-source", "Sets the type and source of the cell at index.", {"cell_index": int, "cell_type": str, "source": str})
+@tool("set-cell-type-and-source", "Sets the type and source of the cell at zero-based index.", {"cell_index": int, "cell_type": str, "source": str})
 async def set_cell_type_and_source(args) -> str:
     """Set cell type and source for the cell at index for the active notebook.
 
@@ -1018,7 +1018,7 @@ async def set_cell_type_and_source(args) -> str:
 
     return tool_text_response(ui_cmd_response)
 
-@tool("delete-cell", "Deletes the cell at index.", {"cell_index": int})
+@tool("delete-cell", "Deletes the cell at zero-based index.", {"cell_index": int})
 async def delete_cell(args) -> str:
     """Delete the cell at index for the active notebook.
 
@@ -1031,7 +1031,7 @@ async def delete_cell(args) -> str:
 
     return tool_text_response(f"Deleted the cell at index: {args['cell_index']}")
 
-@tool("insert-cell", "Inserts a cell with type and source at index.", {"cell_index": int, "cell_type": str, "source": str})
+@tool("insert-cell", "Inserts a cell with type and source at zero-based index.", {"cell_index": int, "cell_type": str, "source": str})
 async def insert_cell(args) -> str:
     """Insert cell with type and source at index for the active notebook.
 
@@ -1045,7 +1045,7 @@ async def insert_cell(args) -> str:
 
     return tool_text_response(ui_cmd_response)
 
-@tool("run-cell", "Runs the cell at index.", {"cell_index": int})
+@tool("run-cell", "Runs the cell at zero-based index.", {"cell_index": int})
 async def run_cell(args) -> str:
     """Run the cell at index for the active notebook.
 
