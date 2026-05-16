@@ -49,6 +49,21 @@ github_auth = {
     "token_expires_at": dt.datetime.now()
 }
 
+# Populated from https://api.githubcopilot.com/models once the user has a
+# valid Copilot bearer token. Each entry is a normalized dict:
+# {"id": str, "name": str, "context_window": int}. Empty until the first
+# successful fetch; the LLM provider falls back to its hardcoded list in
+# that case so the settings UI is never blank. Mutated in place by
+# `fetch_copilot_models` so module-level `from ... import` references
+# stay current.
+copilot_models_cache: list[dict] = []
+
+# Conservative floor when the Copilot API omits limits for a model. Picked
+# to match the smallest token cap any Copilot-served model has historically
+# carried, so the token-budget meter (extension.py: `remaining_token_budget`)
+# doesn't zero out and strip all additional context.
+_COPILOT_DEFAULT_CONTEXT_WINDOW = 4096
+
 stop_requested = False
 get_access_code_thread = None
 get_token_thread = None
@@ -313,7 +328,7 @@ def get_token():
             logout()
             wait_for_tokens()
             return
-        
+
         if resp.status_code != 200:
             log.error(f"Failed to get token from GitHub Copilot: {resp_json}")
             return
@@ -328,14 +343,117 @@ def get_token():
         github_auth["verification_uri"] = None
         github_auth["user_code"] = None
         github_auth["status"] = LoginStatus.LOGGED_IN
-        emit_github_login_status_change()
 
         endpoints = resp_json.get('endpoints', {})
         API_ENDPOINT = endpoints.get('api', API_ENDPOINT)
         PROXY_ENDPOINT = endpoints.get('proxy', PROXY_ENDPOINT)
         TOKEN_REFRESH_INTERVAL = resp_json.get('refresh_in', TOKEN_REFRESH_INTERVAL)
+
+        # Populate the chat-model catalogue before announcing LOGGED_IN so
+        # the frontend's capabilities refetch (triggered by the status
+        # change) picks up the dynamic list in the same round trip.
+        # Best-effort: failure logs and falls back to the provider's
+        # hardcoded list so the settings UI is never blank.
+        fetch_copilot_models()
+
+        emit_github_login_status_change()
     except Exception as e:
         log.error(f"Failed to get token from GitHub Copilot: {e}")
+
+
+def fetch_copilot_models() -> list[dict]:
+    """Fetch the chat-model catalogue from https://api.githubcopilot.com/models.
+
+    Filters to chat models with `model_picker_enabled = true` (the same
+    surface GitHub's official clients expose in their model picker), and
+    normalizes each entry to {"id": str, "name": str, "context_window": int}.
+    Stores the result in ``copilot_models_cache`` (mutated in place) so the
+    LLM provider's `chat_models` property reflects the live list on the
+    next access. Returns the new list; returns the existing cache unchanged
+    on error so a transient outage doesn't blank the dropdown.
+    """
+    token = github_auth.get("token")
+    if not token:
+        return list(copilot_models_cache)
+    try:
+        resp = requests.get(
+            f"{API_ENDPOINT}/models",
+            headers={
+                "authorization": f"Bearer {token}",
+                "editor-version": EDITOR_VERSION,
+                "editor-plugin-version": EDITOR_PLUGIN_VERSION,
+                "user-agent": USER_AGENT,
+                # vscode-chat anchors the response to the same model set
+                # GitHub's official picker shows. Changing this string would
+                # bias the catalogue toward a different surface (inline,
+                # JetBrains, etc.); leave it unless that's the intent.
+                "copilot-integration-id": "vscode-chat",
+            },
+            timeout=10,
+        )
+    except Exception as e:
+        log.warning(f"Failed to fetch Copilot models: {e}")
+        return list(copilot_models_cache)
+
+    if resp.status_code != 200:
+        log.warning(f"Copilot models endpoint returned {resp.status_code}: {resp.text[:200]}")
+        return list(copilot_models_cache)
+
+    try:
+        payload = resp.json()
+    except ValueError as e:
+        log.warning(f"Copilot models response was not JSON: {e}")
+        return list(copilot_models_cache)
+
+    raw_models = payload.get("data", []) if isinstance(payload, dict) else []
+    normalized: list[dict] = []
+    seen_ids: set[str] = set()
+    for entry in raw_models:
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("model_picker_enabled"):
+            continue
+        caps = entry.get("capabilities", {}) or {}
+        if caps.get("type") != "chat":
+            continue
+        model_id = entry.get("id")
+        if not isinstance(model_id, str) or not model_id or model_id in seen_ids:
+            continue
+        seen_ids.add(model_id)
+        name = entry.get("name") or model_id
+        limits = caps.get("limits", {}) or {}
+        context_window = (
+            limits.get("max_context_window_tokens")
+            or limits.get("max_prompt_tokens")
+            or _COPILOT_DEFAULT_CONTEXT_WINDOW
+        )
+        try:
+            context_window = int(context_window)
+        except (TypeError, ValueError):
+            context_window = _COPILOT_DEFAULT_CONTEXT_WINDOW
+        if context_window <= 0:
+            context_window = _COPILOT_DEFAULT_CONTEXT_WINDOW
+        normalized.append({
+            "id": model_id,
+            "name": str(name),
+            "context_window": context_window,
+        })
+
+    # Preserve the existing cache when the API returns an empty (but
+    # well-formed) response. Replacing a known-good list with [] would
+    # silently flip the provider back to its hardcoded fallback.
+    if not normalized and copilot_models_cache:
+        log.warning("Copilot models endpoint returned no entries; keeping previous cache.")
+        return list(copilot_models_cache)
+
+    copilot_models_cache.clear()
+    copilot_models_cache.extend(normalized)
+    return list(copilot_models_cache)
+
+
+def invalidate_copilot_models_cache() -> None:
+    """Clear the memoized Copilot chat-model list. Mostly used by tests."""
+    copilot_models_cache.clear()
 
 def get_token_thread_func():
     global github_auth, get_token_thread, last_token_fetch_time

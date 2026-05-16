@@ -518,7 +518,13 @@ export class NBIAPI {
       } else if (
         msg.type === BackendMessageType.GitHubCopilotLoginStatusChange
       ) {
-        this.updateGitHubLoginStatus().then(() => {
+        // The Copilot chat-model catalogue is fetched lazily once the bearer
+        // token is minted (issue #258), so the model dropdown depends on a
+        // capabilities refresh in addition to the login-status update.
+        Promise.all([
+          this.updateGitHubLoginStatus(),
+          this.fetchCapabilities()
+        ]).then(() => {
           this.githubLoginStatusChanged.emit();
         });
       } else if (msg.type === BackendMessageType.SkillsReloaded) {
