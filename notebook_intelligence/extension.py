@@ -1539,6 +1539,20 @@ class WebsocketCopilotResponseEmitter(ChatResponse):
         self.chat_history = chat_history
         self.streamed_contents = []
         self.streamed_reasoning_contents = []
+        # Capture the Tornado IOLoop the websocket lives on. stream() /
+        # finish() / run_ui_command() get called from worker threads
+        # (Claude SDK, MCP, base chat participant); writing directly to
+        # the websocket from those threads is unsafe because Tornado's
+        # internal write buffer is a bytearray with active exports and a
+        # cross-thread mutation raises `BufferError: Existing exports of
+        # data: object cannot be re-sized` (issue #264). Marshaling the
+        # write back to the IOLoop's thread fixes it.
+        self._io_loop = tornado.ioloop.IOLoop.current()
+
+    def _send_async(self, message: dict) -> None:
+        self._io_loop.asyncio_loop.call_soon_threadsafe(
+            self.websocket_handler.write_message, message
+        )
 
     @property
     def chat_id(self) -> str:
@@ -1732,7 +1746,7 @@ class WebsocketCopilotResponseEmitter(ChatResponse):
                 if reasoning_content is not None:
                     self.streamed_reasoning_contents.append(reasoning_content)
 
-        self.websocket_handler.write_message({
+        self._send_async({
             "id": self.messageId,
             "participant": self.participant_id,
             "type": BackendMessageType.StreamMessage,
@@ -1744,7 +1758,7 @@ class WebsocketCopilotResponseEmitter(ChatResponse):
         self.chat_history.add_message(self.chatId, {"role": "assistant", "content": "".join(self.streamed_contents), "reasoning_content": "".join(self.streamed_reasoning_contents)})
         self.streamed_contents = []
         self.streamed_reasoning_contents = []
-        self.websocket_handler.write_message({
+        self._send_async({
             "id": self.messageId,
             "participant": self.participant_id,
             "type": BackendMessageType.StreamEnd,
@@ -1753,7 +1767,7 @@ class WebsocketCopilotResponseEmitter(ChatResponse):
 
     async def run_ui_command(self, command: str, args: dict = {}) -> None:
         callback_id = str(uuid.uuid4())
-        self.websocket_handler.write_message({
+        self._send_async({
             "id": self.messageId,
             "participant": self.participant_id,
             "type": BackendMessageType.RunUICommand,
