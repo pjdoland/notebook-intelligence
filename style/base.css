@@ -1051,8 +1051,6 @@ body[data-jp-theme-light='false'] .inline-popover {
 .config-dialog {
   display: flex;
   flex-direction: column;
-  width: 500px;
-  height: 100%;
 }
 
 .config-dialog-container .jp-Dialog-content {
