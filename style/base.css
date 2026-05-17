@@ -1016,6 +1016,19 @@ pre:has(.code-block-header) {
   border: 1px solid var(--jp-border-color1);
 }
 
+button.send-button {
+  padding: 4px;
+  width: 24px;
+  height: 24px;
+}
+
+button.send-button:disabled,
+button.send-button:disabled:hover,
+button.send-button:disabled:active {
+  cursor: default;
+  background-color: var(--jp-accept-color-normal);
+}
+
 .send-button:hover:enabled {
   background-color: var(--jp-layout-color1);
 }
@@ -1023,12 +1036,6 @@ pre:has(.code-block-header) {
 .send-button svg {
   width: 18px;
   height: 18px;
-}
-
-button.send-button {
-  padding: 4px;
-  width: 24px;
-  height: 24px;
 }
 
 .inline-popover {
