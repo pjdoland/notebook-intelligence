@@ -242,7 +242,7 @@
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 10px;
+  gap: 4px;
 }
 
 .chat-mode-widgets-container {
@@ -269,6 +269,11 @@
   padding: 2px;
   cursor: pointer;
   color: var(--jp-ui-font-color2);
+  transition: color var(--jp-transition-duration, 100ms) ease-in-out;
+}
+
+.user-input-footer-button:hover {
+  color: var(--jp-ui-font-color1);
 }
 
 /* Reset native chrome on the footer buttons that now render as <button>
