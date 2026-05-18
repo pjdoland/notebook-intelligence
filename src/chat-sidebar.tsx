@@ -74,6 +74,7 @@ import {
   isDarkTheme,
   writeTextToClipboard
 } from './utils';
+import { injectHtmlFrameCsp } from './html-frame-csp';
 import { CheckBoxItem } from './components/checkbox';
 import { mcpServerSettingsToEnabledState } from './components/mcp-util';
 import claudeSvgStr from '../style/icons/claude.svg';
@@ -499,7 +500,10 @@ const answeredForms = new Map<string, string>();
 
 function ChatResponseHTMLFrame(props: any) {
   const iframSrc = useMemo(
-    () => URL.createObjectURL(new Blob([props.source], { type: 'text/html' })),
+    () =>
+      URL.createObjectURL(
+        new Blob([injectHtmlFrameCsp(props.source)], { type: 'text/html' })
+      ),
     []
   );
   return (
