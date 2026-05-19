@@ -1221,6 +1221,10 @@ class SkillDetailHandler(SkillsBaseHandler):
                 description=data.get("description"),
                 allowed_tools=data.get("allowed_tools"),
                 body=data.get("body"),
+                # None preserves the current value; explicit True/False applies.
+                # The manager rejects invalid combinations (managed + tracking,
+                # no source + tracking).
+                tracks_upstream=data.get("tracks_upstream"),
             )
             self.finish(json.dumps({"skill": skill.to_dict(include_body=True)}))
         except (FileNotFoundError, ValueError) as e:
@@ -1277,10 +1281,77 @@ class SkillsImportHandler(SkillsBaseHandler):
                 scope=scope,
                 name_override=data.get("name"),
                 overwrite=bool(data.get("overwrite", False)),
+                tracks_upstream=bool(data.get("tracks_upstream", False)),
             )
             self.finish(json.dumps({"skill": skill.to_dict(include_body=True)}))
         except (FileExistsError, FileNotFoundError, ValueError) as e:
             self._error(e)
+
+
+class SkillSyncHandler(SkillsBaseHandler):
+    """Re-fetch a single user-imported skill that has opted into tracking.
+
+    Gated by the same `allow_github_skill_import` policy as the initial
+    import: sync is the same network egress with the same trust
+    boundary, and an admin who's disabled imports does not want sync
+    silently keeping skills fresh on the side.
+    """
+
+    @tornado.web.authenticated
+    async def post(self, scope, name):
+        if self._reject_if_github_import_disabled():
+            return
+        # The sync action does blocking HTTP (commits-API probe plus
+        # optional tarball download). Run off the event loop so the
+        # Tornado IO thread keeps serving other requests.
+        loop = asyncio.get_event_loop()
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: self.skill_manager.sync_tracking_skill(scope, name),
+            )
+            self.finish(json.dumps(result))
+        except (FileNotFoundError, ValueError, RuntimeError) as e:
+            self._error(e)
+
+
+class SkillsSyncAllTrackingHandler(SkillsBaseHandler):
+    """Batch sync every skill that has `tracks_upstream` enabled.
+
+    Returns per-skill results so the UI can show which ones updated,
+    which were unchanged, and which failed. Failures are isolated per
+    skill: a single broken upstream doesn't stop the rest of the sync.
+    """
+
+    @tornado.web.authenticated
+    async def post(self):
+        if self._reject_if_github_import_disabled():
+            return
+        loop = asyncio.get_event_loop()
+        skills = await loop.run_in_executor(
+            None, self.skill_manager.list_tracking_skills
+        )
+        results = []
+        for skill in skills:
+            try:
+                outcome = await loop.run_in_executor(
+                    None,
+                    lambda s=skill: self.skill_manager.sync_tracking_skill(
+                        s.scope, s.name
+                    ),
+                )
+                results.append({
+                    "scope": skill.scope,
+                    "name": skill.name,
+                    **outcome,
+                })
+            except Exception as e:  # noqa: BLE001 — per-skill isolation
+                results.append({
+                    "scope": skill.scope,
+                    "name": skill.name,
+                    "error": str(e),
+                })
+        self.finish(json.dumps({"results": results}))
 
 
 class SkillsReconcileHandler(SkillsBaseHandler):
@@ -2701,6 +2772,8 @@ class NotebookIntelligence(ExtensionApp):
         route_pattern_skills_import_preview = url_path_join(base_url, "notebook-intelligence", "skills", "import", "preview")
         route_pattern_skills_import = url_path_join(base_url, "notebook-intelligence", "skills", "import")
         route_pattern_skills_reconcile = url_path_join(base_url, "notebook-intelligence", "skills", "reconcile")
+        route_pattern_skills_sync_all = url_path_join(base_url, "notebook-intelligence", "skills", "sync-all-tracking")
+        route_pattern_skill_sync = url_path_join(base_url, "notebook-intelligence", "skills", r"(user|project)", skill_name, "sync")
         route_pattern_skills_reconciler_stop = url_path_join(
             base_url, "notebook-intelligence", "skills", "reconciler", "stop"
         )
@@ -2819,6 +2892,8 @@ class NotebookIntelligence(ExtensionApp):
             (route_pattern_skills_import_preview, SkillsImportPreviewHandler),
             (route_pattern_skills_import, SkillsImportHandler),
             (route_pattern_skills_reconcile, SkillsReconcileHandler),
+            (route_pattern_skills_sync_all, SkillsSyncAllTrackingHandler),
+            (route_pattern_skill_sync, SkillSyncHandler),
             # Deliberately not gated by SkillsBaseHandler — the kill switch
             # must remain reachable while skills_management_policy=force-off
             # is the active state. See the handler docstring.
