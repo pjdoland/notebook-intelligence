@@ -1,13 +1,13 @@
 import importlib.util
 import sys
 
-print("PROBE conftest __name__:", __name__, flush=True)
-print("PROBE sys.path:", flush=True)
-for _p in sys.path:
-    print("   ", _p, flush=True)
-_s = importlib.util.find_spec("tests")
-print("PROBE tests spec:", _s, flush=True)
-print("PROBE tests in sys.modules:", "tests" in sys.modules, flush=True)
+with open("/tmp/probe.txt", "a") as _f:
+    _f.write(f"PROBE conftest __name__: {__name__}\n")
+    _f.write("PROBE sys.path:\n")
+    for _p in sys.path:
+        _f.write(f"    {_p}\n")
+    _f.write(f"PROBE tests spec: {importlib.util.find_spec('tests')}\n")
+    _f.write(f"PROBE tests in sys.modules: {'tests' in sys.modules}\n")
 
 import asyncio
 import io
