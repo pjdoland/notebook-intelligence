@@ -48,6 +48,9 @@ jobs:
     - name: Run Python tests
       run: |
         set -eux
+        python -c "import sys; print('SYSPATH:'); [print('  ', p) for p in sys.path]"
+        python -c "import importlib.util; s = importlib.util.find_spec('tests'); print('tests spec:', s); print('locs:', getattr(s, 'submodule_search_locations', None))" || true
+        pip show -f notebook_intelligence | grep -i "^Location\|tests" || true
         pytest tests/ -q
 
     - name: Run JavaScript tests
