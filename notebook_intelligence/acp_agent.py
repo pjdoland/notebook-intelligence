@@ -30,10 +30,11 @@ import json
 import logging
 import os
 import re
-import shlex
 import sys
 import threading
 import time
+import unicodedata
+import uuid
 from datetime import datetime
 from typing import Any, Optional
 
@@ -61,7 +62,7 @@ from notebook_intelligence.acp_registry import (
 )
 from notebook_intelligence.base_chat_participant import BaseChatParticipant
 from notebook_intelligence.claude_sessions import CONTROL_SLASH_COMMANDS
-from notebook_intelligence.util import ThreadSafeWebSocketConnector, get_jupyter_root_dir
+from notebook_intelligence.util import BIDI_CONTROL_CODEPOINTS, ThreadSafeWebSocketConnector, get_jupyter_root_dir
 
 log = logging.getLogger(__name__)
 
@@ -197,29 +198,48 @@ class _NbiAcpClient(acp.Client):
             return acp.RequestPermissionResponse(
                 outcome=schema.DeniedOutcome(outcome="cancelled")
             )
-        callback_id = f"acp-perm-{tool_call.tool_call_id}"
-        title = getattr(tool_call, "title", None) or "Run this tool?"
         agent_label = self._owner.agent_spec.label
-        request = f"Approve: {title}?"
-        details = _permission_details(tool_call)
-        if details:
-            request += f"\n\n{details}"
-        escaped = _escape_bidi_controls(request)
-        if escaped != request:
-            escaped += (
-                "\n\nWarning: this request contains hidden Unicode direction "
-                "controls, shown above as \\u{...}. They can make text read "
-                "differently from what runs."
-            )
+        agent_id = self._owner.agent_spec.id
+        command, script = _command_parts(tool_call)
+        bidi = [c for c in command if ord(c) in BIDI_CONTROL_CODEPOINTS]
+        if bidi:
+            # Same policy as Claude mode's Bash approvals: text that displays
+            # in a different order from how it runs is refused, not offered.
+            names = ", ".join(dict.fromkeys(
+                f"U+{ord(c):04X} {unicodedata.name(c)}" for c in bidi
+            ))
+            resp.stream(MarkdownData(
+                f"&#x26A0; **{agent_label} tool call rejected: its command contains "
+                f"hidden Unicode bidirectional controls ({names}).**"
+            ))
+            return _reject(options)
+        # Unique per request: codex-acp can ask more than once for one call.
+        callback_id = f"acp-perm-{tool_call.tool_call_id}-{uuid.uuid4().hex}"
+        raw_title = getattr(tool_call, "title", None) or ""
+        title = _single_line(raw_title)
+        details = _permission_details(tool_call, agent_id, agent_label)
+        if not title:
+            request = "Approve this tool call?"
+        elif script and _single_line(script) == title:
+            request = "Approve running this command?"
+        else:
+            request = f"Approve: {title}?"
+        if allow.kind != "allow_once":
+            details.append({"label": "Approving also allows", "value": _single_line(allow.name or "")})
+        notes = [f"{agent_label} decides which tools to ask about, so some actions may run without a prompt."]
+        shown = [raw_title, allow.name or "", *_strings(getattr(tool_call, "raw_input", None))]
+        shown += [
+            _block_text(getattr(item, "content", None))
+            for item in getattr(tool_call, "content", None) or []
+        ]
+        if any(_has_invisible(text) for text in shown):
+            notes.insert(0, "Characters that would not display are shown as \\u{XXXX}.")
         pending_user_input = resp.stream_user_input_request(
             callback_id,
             ConfirmationData(
             title=f"{agent_label} tool call",
-            message=(
-                f"{escaped}\n\n"
-                f"{agent_label} decides which tools to ask about, so some actions may run "
-                "without a prompt."
-            ),
+            message=" ".join([request, *notes]),
+            details=details or None,
             confirmArgs={"id": resp.message_id, "data": {
                 "callback_id": callback_id, "data": {"confirmed": True}}},
             cancelArgs={"id": resp.message_id, "data": {
@@ -235,13 +255,7 @@ class _NbiAcpClient(acp.Client):
             return acp.RequestPermissionResponse(
                 outcome=schema.AllowedOutcome(outcome="selected", option_id=allow.option_id)
             )
-        reject = next((o for o in options if o.kind == "reject_once"), None) \
-            or next((o for o in options if str(o.kind).startswith("reject")), None)
-        if reject is not None:
-            return acp.RequestPermissionResponse(
-                outcome=schema.AllowedOutcome(outcome="selected", option_id=reject.option_id)
-            )
-        return acp.RequestPermissionResponse(outcome=schema.DeniedOutcome(outcome="cancelled"))
+        return _reject(options)
 
     # fs/*: implemented so an agent that delegates file ops (e.g. claude-acp)
     # routes through NBI. codex-acp self-applies, so these may not fire for it.
@@ -284,69 +298,185 @@ def _block_text(block) -> str:
     return getattr(block, "text", "") or ""
 
 
-# Same set as claude.py's; duplicated to keep this module free of the Claude
-# SDK import, like _diff_lines above.
-_BIDI_CONTROL_CODEPOINTS = frozenset(
-    {
-        0x061C,  # ARABIC LETTER MARK
-        0x200E,  # LEFT-TO-RIGHT MARK
-        0x200F,  # RIGHT-TO-LEFT MARK
-        *range(0x202A, 0x202F),  # embeddings, overrides, and pop formatting
-        *range(0x2066, 0x206A),  # directional isolates and pop isolate
-    }
-)
+# Letters and symbols that render as blank space without being whitespace.
+_BLANK_LOOKING_CODEPOINTS = frozenset({0x034F, 0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0})
+# Shells whose ``<shell> -c <script>`` argv the approval card shows as a script.
+_SCRIPT_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+_BLANK_LINE_RUN = 2
+_SPACE_RUN = 40
 
 
-def _escape_bidi_controls(text: str) -> str:
-    return "".join(
-        f"\\u{{{ord(character):04X}}}"
-        if ord(character) in _BIDI_CONTROL_CODEPOINTS
-        else character
-        for character in text
-    )
+def _escape_invisible(text: str) -> str:
+    """Write characters that do not display as themselves as ``\\u{XXXX}``.
+
+    That covers control and format characters (including bidi controls and
+    zero-width characters), line and paragraph separators, spaces other than
+    U+0020, and blank-looking letters. A browser can draw these as nothing or
+    as a line break while a shell reads them as part of a word, so a command
+    containing them could read differently from how it runs. Newlines and
+    tabs are kept.
+    """
+    out = []
+    for character in text:
+        category = unicodedata.category(character)
+        if character in "\n\t":
+            out.append(character)
+        elif (
+            category[0] == "C"
+            or category in ("Zl", "Zp")
+            or (category == "Zs" and character != " ")
+            or ord(character) in _BLANK_LOOKING_CODEPOINTS
+        ):
+            out.append(f"\\u{{{ord(character):04X}}}")
+        else:
+            out.append(character)
+    return "".join(out)
 
 
-def _permission_details(tool_call) -> str:
-    """Plain-text lines describing what an ACP permission request would do.
+def _has_invisible(text: str) -> bool:
+    return _escape_invisible(text) != text
+
+
+def _reject(options) -> "acp.RequestPermissionResponse":
+    reject = next((o for o in options if o.kind == "reject_once"), None) \
+        or next((o for o in options if str(o.kind).startswith("reject")), None)
+    if reject is not None:
+        return acp.RequestPermissionResponse(
+            outcome=schema.AllowedOutcome(outcome="selected", option_id=reject.option_id)
+        )
+    return acp.RequestPermissionResponse(outcome=schema.DeniedOutcome(outcome="cancelled"))
+
+
+def _single_line(text: str) -> str:
+    return " ".join(_escape_invisible(text).split())
+
+
+def _multi_line(text: str) -> str:
+    """Escape ``text`` and mark long runs of blank lines or spaces.
+
+    A value padded with blank lines or spaces could otherwise push its real
+    content out of view next to the Approve button.
+    """
+    shown = []
+    blank_run = 0
+    for line in _escape_invisible(text).split("\n"):
+        if not line.strip():
+            blank_run += 1
+            continue
+        if blank_run:
+            shown.extend([""] * blank_run if blank_run < _BLANK_LINE_RUN else [f"[{blank_run} blank lines]"])
+            blank_run = 0
+        shown.append(re.sub(
+            rf"[ \t]{{{_SPACE_RUN},}}", lambda m: f" [{len(m.group(0))} spaces] ", line
+        ))
+    if blank_run:
+        shown.append(f"[{blank_run} blank lines]")
+    return "\n".join(shown)
+
+
+def _command_label(text: str, runner: str = "") -> str:
+    notes = [f"run by {runner}"] if runner else []
+    lines = text.count("\n") + 1
+    if lines > 1:
+        notes.append(f"{lines} lines")
+    return f"Command ({', '.join(notes)})" if notes else "Command"
+
+
+def _json_text(value) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _permission_details(tool_call, agent_id: str, agent_label: str) -> list[dict]:
+    """Label and value pairs describing what an ACP permission request does.
 
     The request's title is the agent's own summary. codex-acp also sends the
-    exact command, its working directory, and the reason in ``raw_input``,
-    and approving can let that command run outside Codex's sandbox, so the
-    approval card shows them. The card renders its message as plain text, so
-    none of this is parsed as markdown. Other agents' text content is shown
-    when ``raw_input`` has none of these fields.
+    exact command, its working directory, the reason, and any network access
+    or extra permissions in ``raw_input``, and approving can let that command
+    run outside Codex's sandbox. Other agents send their own ``raw_input``
+    shapes, so for them the card shows the text content and the whole input.
+    Labels come from NBI; every value is agent-controlled and escaped, and the
+    frontend renders each value in its own block.
     """
     raw = getattr(tool_call, "raw_input", None)
-    raw = raw if isinstance(raw, dict) else {}
-    lines = []
-    command = raw.get("command")
-    if isinstance(command, list) and command and all(isinstance(p, str) for p in command):
-        if len(command) == 3 and command[1] in ("-c", "-lc"):
-            lines.append(f"Command: {command[2]}")
-            lines.append(f"Shell: {command[0]} {command[1]}")
-        else:
-            lines.append(f"Command: {shlex.join(command)}")
-    elif isinstance(command, str) and command:
-        lines.append(f"Command: {command}")
-    for key, label in (("cwd", "Working directory"), ("reason", "Reason")):
-        value = raw.get(key)
-        if isinstance(value, str) and value:
-            lines.append(f"{label}: {value}")
-    network = raw.get("network_approval_context")
-    if isinstance(network, dict) and network.get("host"):
-        lines.append(
-            f"Network access: {network.get('protocol') or ''} {network['host']}".replace("  ", " ").strip()
-        )
-    permissions = raw.get("additional_permissions")
-    if permissions:
-        lines.append(f"Additional permissions: {json.dumps(permissions, sort_keys=True)}")
-    if not lines:
-        for item in getattr(tool_call, "content", None) or []:
-            if getattr(item, "type", None) == "content":
-                text = _block_text(getattr(item, "content", None))
-                if text:
-                    lines.append(text)
-    return "\n".join(lines)
+    details = []
+    if agent_id == "codex" and isinstance(raw, dict):
+        command = raw.get("command")
+        if isinstance(command, list) and command and all(isinstance(p, str) for p in command):
+            shell = os.path.basename(command[0])
+            if len(command) == 3 and command[1] in ("-c", "-lc") and shell in _SCRIPT_SHELLS:
+                details.append({
+                    "label": _command_label(command[2], f"{shell} {command[1]}"),
+                    "value": _multi_line(command[2]),
+                })
+                if command[0] != shell:
+                    details.append({"label": "Shell", "value": _single_line(command[0])})
+            else:
+                details.append({"label": "Command", "value": _multi_line(json.dumps(command, ensure_ascii=False))})
+        elif command is not None:
+            text = command if isinstance(command, str) else json.dumps(command, ensure_ascii=False)
+            details.append({"label": _command_label(text), "value": _multi_line(text)})
+        title = _single_line(getattr(tool_call, "title", None) or "")
+        for key, label in (("cwd", "Working directory"), ("grant_root", "Write access under"), ("reason", "Reason")):
+            value = raw.get(key)
+            if isinstance(value, str) and value.strip() and not (key == "reason" and _single_line(value) == title):
+                details.append({"label": label, "value": _single_line(value)})
+        network = raw.get("network_approval_context")
+        if isinstance(network, dict):
+            parts = [p for p in (network.get("protocol"), network.get("host")) if isinstance(p, str) and p]
+            if parts:
+                details.append({"label": "Network access", "value": _single_line(" ".join(parts))})
+        for key, label in (("additional_permissions", "Additional permissions"), ("permissions", "Requested permissions")):
+            if raw.get(key):
+                details.append({"label": label, "value": _multi_line(_json_text(raw[key]))})
+        if details:
+            return details
+    texts = [
+        _block_text(getattr(item, "content", None))
+        for item in getattr(tool_call, "content", None) or []
+        if getattr(item, "type", None) == "content"
+    ]
+    text = "\n\n".join(t for t in texts if t)
+    if text:
+        details.append({"label": f"Details from {agent_label}", "value": _multi_line(text)})
+    if agent_id != "codex" and raw not in (None, {}, []):
+        details.append({"label": "Input", "value": _multi_line(_json_text(raw))})
+    return details
+
+
+def _command_parts(tool_call) -> tuple[str, str]:
+    """The whole command a permission request carries and the script it runs.
+
+    The first value is what the bidi check scans; the second is the part the
+    card compares with the title (the script for ``<shell> -c <script>``).
+    """
+    raw = getattr(tool_call, "raw_input", None)
+    command = raw.get("command") if isinstance(raw, dict) else None
+    if isinstance(command, str):
+        return command, command
+    if command is None:
+        return "", ""
+    whole = json.dumps(command, ensure_ascii=False)
+    if (
+        isinstance(command, list) and len(command) == 3
+        and all(isinstance(p, str) for p in command)
+        and command[1] in ("-c", "-lc")
+        and os.path.basename(command[0]) in _SCRIPT_SHELLS
+    ):
+        return whole, command[2]
+    return whole, whole
+
+
+def _strings(value):
+    """Every string inside a JSON-like value, for the invisible-character check."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _strings(key)
+            yield from _strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _strings(item)
 
 
 def _epoch_from_iso(value) -> float:

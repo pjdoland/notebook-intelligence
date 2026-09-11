@@ -1009,9 +1009,24 @@ function ChatResponse(props: any) {
                     </div>
                   ) : null}
                   {item.content.message ? (
-                    <div className="chat-confirmation-message">
-                      {item.content.message}
-                    </div>
+                    <div>{item.content.message}</div>
+                  ) : null}
+                  {item.content.details?.length ? (
+                    <dl className="chat-confirmation-details">
+                      {item.content.details.map(
+                        (
+                          detail: { label: string; value: string },
+                          detailIndex: number
+                        ) => (
+                          <React.Fragment key={detailIndex}>
+                            <dt>{detail.label}</dt>
+                            <dd>
+                              <pre>{detail.value}</pre>
+                            </dd>
+                          </React.Fragment>
+                        )
+                      )}
+                    </dl>
                   ) : null}
                   <button
                     className="jp-Dialog-button jp-mod-accept jp-mod-styled"

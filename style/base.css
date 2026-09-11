@@ -881,7 +881,28 @@ pre:has(.code-block-header) {
   line-height: 20px;
 }
 
-.chat-confirmation-message {
+.chat-confirmation-details {
+  margin: 6px 0;
+}
+
+.chat-confirmation-details dt {
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.chat-confirmation-details dd {
+  margin: 2px 0 0;
+}
+
+.chat-confirmation-details pre {
+  margin: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--jp-border-color2);
+  border-radius: 3px;
+  background: var(--jp-layout-color2);
+  font-family: var(--jp-code-font-family);
+  font-size: var(--jp-code-font-size);
+  line-height: var(--jp-code-line-height);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
