@@ -222,9 +222,23 @@ class TestApprovalArgs:
         args = codex_approval_args(False)
         assert args == ["-c", 'approval_policy="untrusted"']
 
-    def test_full_access_runs_unattended(self):
+    def test_default_leaves_the_sandbox_to_codex(self):
         from notebook_intelligence.acp_agent import codex_approval_args
-        assert codex_approval_args(True) == ["-c", 'approval_policy="never"']
+        assert not any("sandbox_mode" in a for a in codex_approval_args(False))
+
+    def test_full_access_runs_unattended_with_a_writable_workspace(self):
+        """Full access must pin a writable sandbox, not only stop asking.
+
+        Codex's default sandbox for an untrusted project is read-only. With
+        ``approval_policy = never`` nothing can be approved past it, so a full
+        access session with only the approval flag refused every edit
+        ("patch rejected: writing is blocked by read-only sandbox").
+        """
+        from notebook_intelligence.acp_agent import codex_approval_args
+        assert codex_approval_args(True) == [
+            "-c", 'approval_policy="never"',
+            "-c", 'sandbox_mode="workspace-write"',
+        ]
 
 
 class TestCodexModelArgs:
@@ -314,6 +328,35 @@ class TestCodexModelArgs:
             "-c", 'approval_policy="untrusted"',
             "-c", 'model="m1"',
             "-c", 'openai_base_url="http://proxy/v1"',
+        ]
+
+    def test_serve_launches_full_access_with_a_writable_sandbox(self, tmp_path):
+        import notebook_intelligence.acp_agent as mod
+
+        host = SimpleNamespace(
+            websocket_connector=None,
+            nbi_config=SimpleNamespace(
+                acp_settings={"enabled": True, "agent": "codex", "full_access": True},
+                nbi_user_dir=str(tmp_path),
+            ),
+        )
+        client = mod.AcpAgentClient(host)
+        captured = {}
+
+        async def fake_exec(*cmd, **kw):
+            captured["cmd"] = list(cmd)
+            raise RuntimeError("captured; abort launch")
+
+        orig = mod.asyncio.create_subprocess_exec
+        mod.asyncio.create_subprocess_exec = fake_exec
+        try:
+            asyncio.run(client._serve())
+        finally:
+            mod.asyncio.create_subprocess_exec = orig
+
+        assert captured["cmd"][-4:] == [
+            "-c", 'approval_policy="never"',
+            "-c", 'sandbox_mode="workspace-write"',
         ]
 
 

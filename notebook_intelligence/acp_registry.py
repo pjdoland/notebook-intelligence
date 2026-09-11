@@ -102,8 +102,16 @@ def codex_approval_args(full_access: bool) -> list[str]:
     Codex asks before anything beyond trusted read-only commands, surfacing the
     request through NBI's per-tool confirmation. ``full_access`` (gated by the
     force-off ``acp_full_access`` admin policy) lets it run unattended. The
-    flag is honored by the codex-acp binary's ``-c key=value`` override, so it
-    works for both API-key and ChatGPT-auth sessions.
+    flags are honored by the codex-acp binary's ``-c key=value`` override, so
+    they work for both API-key and ChatGPT-auth sessions.
+
+    Full access also pins ``sandbox_mode = workspace-write``. Codex runs an
+    untrusted project in a read-only sandbox, which is always the case in the
+    isolated API-key ``CODEX_HOME``, and under ``approval_policy = never``
+    nothing can be approved past it, so without this pin full access refuses
+    every edit.
+    ``workspace-write`` allows writes to the workspace and temp directories and
+    leaves outbound network access off unless Codex's own config enables it.
 
     The override takes precedence over the codex config file. In the API-key
     path NBI also isolates ``CODEX_HOME`` (see ``AcpAgentClient._child_env``),
@@ -112,8 +120,12 @@ def codex_approval_args(full_access: bool) -> list[str]:
     ~/.codex; the ``-c`` pin still overrides its top-level approval_policy.
     See the admin guide for the residual caveat on shared deployments.
     """
-    policy = "never" if full_access else "untrusted"
-    return ["-c", f'approval_policy="{policy}"']
+    if full_access:
+        return [
+            "-c", 'approval_policy="never"',
+            "-c", 'sandbox_mode="workspace-write"',
+        ]
+    return ["-c", 'approval_policy="untrusted"']
 
 
 def _codex_setting_value(value: Optional[str]) -> str:
