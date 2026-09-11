@@ -191,20 +191,20 @@ class _NbiAcpClient(acp.Client):
 
     async def request_permission(self, options, session_id, tool_call, **kw):
         resp = self._response
-        allow = next((o for o in options if o.kind == "allow_once"), None) \
-            or next((o for o in options if str(o.kind).startswith("allow")), None)
+        allow = _pick_option(options, "allow")
         if resp is None or allow is None:
             # No UI to ask, or no allow option offered: fail closed (reject).
             return acp.RequestPermissionResponse(
                 outcome=schema.DeniedOutcome(outcome="cancelled")
             )
         agent_label = self._owner.agent_spec.label
-        agent_id = self._owner.agent_spec.id
-        command, script = _command_parts(tool_call)
+        raw = getattr(tool_call, "raw_input", None)
+        command, script, runner = _parse_command(raw)
         bidi = [c for c in command if ord(c) in BIDI_CONTROL_CODEPOINTS]
         if bidi:
-            # Same policy as Claude mode's Bash approvals: text that displays
-            # in a different order from how it runs is refused, not offered.
+            # Same policy as Claude mode's Bash approvals: a command that
+            # displays in a different order from how it runs is refused and
+            # the turn is interrupted, rather than offered for approval.
             names = ", ".join(dict.fromkeys(
                 f"U+{ord(c):04X} {unicodedata.name(c)}" for c in bidi
             ))
@@ -212,34 +212,62 @@ class _NbiAcpClient(acp.Client):
                 f"&#x26A0; **{agent_label} tool call rejected: its command contains "
                 f"hidden Unicode bidirectional controls ({names}).**"
             ))
+            return _reject(options, cancel=True)
+        codex_event = _is_codex_event(self._owner.agent_spec.id, raw)
+        title = getattr(tool_call, "title", None) or ""
+        script_is_title = codex_event and bool(script) and script.strip() == title.strip()
+        try:
+            details = _permission_details(
+                tool_call, raw, codex_event, script, runner, script_is_title, agent_label
+            )
+            reject = _pick_option(options, "reject")
+            lasting = []
+            # Keep the command (or the whole input) last, next to the buttons.
+            last = details.items.pop() if details.items and details.items[-1]["label"].split(" (")[0] in ("Command", "Input") else None
+            if allow.kind != "allow_once":
+                lasting.append("Approving grants a lasting permission, not only this request.")
+                details.field("Permission granted", allow.name or "")
+                if codex_event and raw.get("proposed_execpolicy_amendment"):
+                    details.block("Lasting rule", _json_text(raw["proposed_execpolicy_amendment"]))
+            if reject is not None and reject.kind != "reject_once":
+                lasting.append("Rejecting records a lasting denial, not only for this request.")
+                details.field("Denial recorded", reject.name or "")
+            if last is not None:
+                details.items.append(last)
+        except _ValueTooLarge:
+            resp.stream(MarkdownData(
+                f"&#x26A0; **{agent_label} tool call rejected: it is too large to show "
+                "in full for approval.**"
+            ))
             return _reject(options)
+        diff_card = bool(_diffs_from_content(getattr(tool_call, "content", None)))
+        if diff_card:
+            # Show a proposed edit's diff on its tool card even if the agent
+            # did not send the tool call before asking.
+            self._emit_tool_call(resp, tool_call)
         # Unique per request: codex-acp can ask more than once for one call.
         callback_id = f"acp-perm-{tool_call.tool_call_id}-{uuid.uuid4().hex}"
-        raw_title = getattr(tool_call, "title", None) or ""
-        title = _single_line(raw_title)
-        details = _permission_details(tool_call, agent_id, agent_label)
-        if not title:
-            request = "Approve this tool call?"
-        elif script and _single_line(script) == title:
-            request = "Approve running this command?"
-        else:
-            request = f"Approve: {title}?"
-        if allow.kind != "allow_once":
-            details.append({"label": "Approving also allows", "value": _single_line(allow.name or "")})
-        notes = [f"{agent_label} decides which tools to ask about, so some actions may run without a prompt."]
-        shown = [raw_title, allow.name or "", *_strings(getattr(tool_call, "raw_input", None))]
-        shown += [
-            _block_text(getattr(item, "content", None))
-            for item in getattr(tool_call, "content", None) or []
+        sentences = [
+            "Approve running this command?" if script_is_title
+            else f"Approve this {agent_label} tool call?",
+            *lasting,
         ]
-        if any(_has_invisible(text) for text in shown):
-            notes.insert(0, "Characters that would not display are shown as \\u{XXXX}.")
+        if command and not command.isascii():
+            sentences.append(
+                "The command contains non-ASCII characters, which can look like "
+                "quotes or letters they are not."
+            )
+        if details.escaped:
+            sentences.append("Characters that would not display are shown as \\u{XXXX}.")
+        sentences.append(
+            f"{agent_label} decides which tools to ask about, so some actions may run without a prompt."
+        )
         pending_user_input = resp.stream_user_input_request(
             callback_id,
             ConfirmationData(
             title=f"{agent_label} tool call",
-            message=" ".join([request, *notes]),
-            details=details or None,
+            message=" ".join(sentences),
+            details=details.items or None,
             confirmArgs={"id": resp.message_id, "data": {
                 "callback_id": callback_id, "data": {"confirmed": True}}},
             cancelArgs={"id": resp.message_id, "data": {
@@ -255,6 +283,12 @@ class _NbiAcpClient(acp.Client):
             return acp.RequestPermissionResponse(
                 outcome=schema.AllowedOutcome(outcome="selected", option_id=allow.option_id)
             )
+        if diff_card:
+            # A rejected edit never starts, so the agent may send no final
+            # status; close the card rather than leave it in progress.
+            self._emit_tool_call(resp, schema.ToolCallUpdate.model_validate(
+                {"toolCallId": tool_call.tool_call_id, "status": "failed"}
+            ))
         return _reject(options)
 
     # fs/*: implemented so an agent that delegates file ops (e.g. claude-acp)
@@ -298,185 +332,265 @@ def _block_text(block) -> str:
     return getattr(block, "text", "") or ""
 
 
-# Letters and symbols that render as blank space without being whitespace.
-_BLANK_LOOKING_CODEPOINTS = frozenset({0x034F, 0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0})
+# Characters that render as nothing or as blank space: Unicode's
+# Default_Ignorable_Code_Point ranges plus blank-looking letters and symbols.
+# Characters str.isprintable() rejects (categories C*, Zl, Zp, and spaces
+# other than U+0020) are caught separately.
+_INVISIBLE_RANGES = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160),
+    (0x17B4, 0x17B5), (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E),
+    (0x2060, 0x206F), (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F),
+    (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFFC), (0x13441, 0x13442),
+    (0x16FE4, 0x16FE4), (0x1BCA0, 0x1BCA3), (0x1D159, 0x1D159),
+    (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
+)
+# Combining marks after this many in a row are escaped: stacked marks can
+# draw over neighbouring text.
+_MAX_COMBINING_MARKS = 3
 # Shells whose ``<shell> -c <script>`` argv the approval card shows as a script.
 _SCRIPT_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 _BLANK_LINE_RUN = 2
 _SPACE_RUN = 40
+# Values are shown whole: the frontend bounds each block's height and lets it
+# scroll, so nothing needs truncating to keep the buttons in reach. A request
+# with a value longer than this is refused instead of being shown in part.
+_MAX_VALUE_CHARS = 200_000
 
 
-def _escape_invisible(text: str) -> str:
+def _is_invisible(character: str) -> bool:
+    codepoint = ord(character)
+    return not character.isprintable() or any(
+        low <= codepoint <= high for low, high in _INVISIBLE_RANGES
+    )
+
+
+def _escape_invisible(text: str, keep_line_breaks: bool) -> str:
     """Write characters that do not display as themselves as ``\\u{XXXX}``.
 
-    That covers control and format characters (including bidi controls and
-    zero-width characters), line and paragraph separators, spaces other than
-    U+0020, and blank-looking letters. A browser can draw these as nothing or
-    as a line break while a shell reads them as part of a word, so a command
-    containing them could read differently from how it runs. Newlines and
-    tabs are kept.
+    A browser can draw these as nothing, as blank space, or as a line break
+    while a shell reads them as part of a word, so text containing them could
+    read differently from how it runs. ``keep_line_breaks`` keeps newlines and
+    tabs for multi-line values; single-line values escape them too.
     """
+    if text.isascii() and (
+        text.isprintable() or (keep_line_breaks and text.replace("\n", "").replace("\t", "").isprintable())
+    ):
+        return text
     out = []
+    marks = 0
     for character in text:
-        category = unicodedata.category(character)
-        if character in "\n\t":
+        if keep_line_breaks and character in "\n\t":
             out.append(character)
-        elif (
-            category[0] == "C"
-            or category in ("Zl", "Zp")
-            or (category == "Zs" and character != " ")
-            or ord(character) in _BLANK_LOOKING_CODEPOINTS
-        ):
+            marks = 0
+            continue
+        combining = unicodedata.category(character) in ("Mn", "Me")
+        marks = marks + 1 if combining else 0
+        if _is_invisible(character) or marks > _MAX_COMBINING_MARKS:
             out.append(f"\\u{{{ord(character):04X}}}")
         else:
             out.append(character)
     return "".join(out)
 
 
-def _has_invisible(text: str) -> bool:
-    return _escape_invisible(text) != text
-
-
-def _reject(options) -> "acp.RequestPermissionResponse":
-    reject = next((o for o in options if o.kind == "reject_once"), None) \
-        or next((o for o in options if str(o.kind).startswith("reject")), None)
-    if reject is not None:
-        return acp.RequestPermissionResponse(
-            outcome=schema.AllowedOutcome(outcome="selected", option_id=reject.option_id)
-        )
-    return acp.RequestPermissionResponse(outcome=schema.DeniedOutcome(outcome="cancelled"))
-
-
-def _single_line(text: str) -> str:
-    return " ".join(_escape_invisible(text).split())
-
-
-def _multi_line(text: str) -> str:
-    """Escape ``text`` and mark long runs of blank lines or spaces.
-
-    A value padded with blank lines or spaces could otherwise push its real
-    content out of view next to the Approve button.
-    """
+def _mark_padding(text: str) -> str:
+    """Mark long runs of blank lines or spaces in an escaped multi-line value."""
     shown = []
     blank_run = 0
-    for line in _escape_invisible(text).split("\n"):
+
+    def flush():
+        if blank_run >= _BLANK_LINE_RUN:
+            shown.append(f"[{blank_run} blank lines]")
+        else:
+            shown.extend([""] * blank_run)
+
+    for line in text.split("\n"):
         if not line.strip():
             blank_run += 1
             continue
-        if blank_run:
-            shown.extend([""] * blank_run if blank_run < _BLANK_LINE_RUN else [f"[{blank_run} blank lines]"])
-            blank_run = 0
-        shown.append(re.sub(
-            rf"[ \t]{{{_SPACE_RUN},}}", lambda m: f" [{len(m.group(0))} spaces] ", line
-        ))
-    if blank_run:
-        shown.append(f"[{blank_run} blank lines]")
+        flush()
+        blank_run = 0
+        shown.append(re.sub(r"[ \t]{2,}", _mark_space_run, line))
+    flush()
     return "\n".join(shown)
 
 
-def _command_label(text: str, runner: str = "") -> str:
-    notes = [f"run by {runner}"] if runner else []
+def _mark_space_run(match) -> str:
+    run = match.group(0)
+    tabs = run.count("\t")
+    # A tab can render as wide as eight spaces.
+    if len(run) - tabs + 8 * tabs < _SPACE_RUN:
+        return run
+    spaces = len(run) - tabs
+    parts = [f"{spaces} spaces"] if spaces else []
+    if tabs:
+        parts.append(f"{tabs} tabs")
+    return f" [{' and '.join(parts)}] "
+
+
+def _without_final_newline(text: str) -> str:
+    return text[:-1] if text.endswith("\n") else text
+
+
+def _parse_command(raw) -> tuple[str, str, str]:
+    """Read ``raw_input["command"]`` once for every use the card makes of it.
+
+    Returns ``(whole, script, runner)``: the whole command as text (what the
+    bidi check scans), the script the card shows, and ``"<shell> <flag>"``
+    when the command is ``<shell> -c <script>`` for a known shell, else "".
+    """
+    command = raw.get("command") if isinstance(raw, dict) else None
+    if command is None:
+        return "", "", ""
+    if isinstance(command, str):
+        return command, command, ""
+    whole = json.dumps(command, ensure_ascii=False)
+    if (
+        isinstance(command, list) and len(command) == 3
+        and all(isinstance(part, str) for part in command)
+        and command[1] in ("-c", "-lc")
+        and os.path.basename(command[0]) in _SCRIPT_SHELLS
+    ):
+        return whole, command[2], f"{os.path.basename(command[0])} {command[1]}"
+    return whole, whole, ""
+
+
+class _ValueTooLarge(Exception):
+    pass
+
+
+def _sized_label(label: str, text: str, notes=(), count_lines: bool = True) -> str:
+    notes = list(notes)
     lines = text.count("\n") + 1
-    if lines > 1:
+    if count_lines and lines > 1:
         notes.append(f"{lines} lines")
-    return f"Command ({', '.join(notes)})" if notes else "Command"
+    if len(text) > 300:
+        notes.append(f"{len(text)} characters")
+    return f"{label} ({', '.join(notes)})" if notes else label
+
+
+class _Details:
+    """Builds the card's label and value pairs and notes any escaping.
+
+    Labels are NBI's own text. Every value comes from the agent, so each is
+    escaped here and rendered by the frontend in its own bounded block.
+    """
+
+    def __init__(self):
+        self.items: list[dict] = []
+        self.escaped = False
+
+    def _escape(self, text: str, keep_line_breaks: bool) -> str:
+        if len(text) > _MAX_VALUE_CHARS:
+            raise _ValueTooLarge()
+        shown = _escape_invisible(text, keep_line_breaks)
+        self.escaped = self.escaped or shown != text
+        return shown
+
+    def escape_line(self, text: str) -> str:
+        """One line of a multi-line block, with its own line breaks escaped."""
+        return self._escape(text, keep_line_breaks=False)
+
+    def field(self, label: str, value: str) -> None:
+        shown = self._escape(value, keep_line_breaks=False)
+        self.items.append({"label": _sized_label(label, value, count_lines=False), "value": shown})
+
+    def block(self, label: str, value: str, notes=()) -> None:
+        value = _without_final_newline(value)
+        shown = _mark_padding(self._escape(value, keep_line_breaks=True))
+        self.items.append({"label": _sized_label(label, value, notes), "value": shown})
 
 
 def _json_text(value) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
 
 
-def _permission_details(tool_call, agent_id: str, agent_label: str) -> list[dict]:
-    """Label and value pairs describing what an ACP permission request does.
+def _is_codex_event(agent_id: str, raw) -> bool:
+    """codex-acp serializes Codex's own event as ``raw_input``, and every such
+    event carries a call id or turn id. Checking the shape as well as the
+    agent id keeps a different adapter launched through NBI_ACP_AGENT_COMMAND
+    from having its input read as Codex fields."""
+    return agent_id == "codex" and isinstance(raw, dict) and ("call_id" in raw or "turn_id" in raw)
+
+
+def _permission_details(tool_call, raw, codex_event: bool, script: str, runner: str,
+                        script_is_title: bool, agent_label: str) -> _Details:
+    """What an ACP permission request would do, as label and value pairs.
 
     The request's title is the agent's own summary. codex-acp also sends the
-    exact command, its working directory, the reason, and any network access
-    or extra permissions in ``raw_input``, and approving can let that command
-    run outside Codex's sandbox. Other agents send their own ``raw_input``
-    shapes, so for them the card shows the text content and the whole input.
-    Labels come from NBI; every value is agent-controlled and escaped, and the
-    frontend renders each value in its own block.
+    exact command, its working directory, the reason, the files an edit
+    changes, and any network access or extra permissions in ``raw_input``,
+    and approving can let that command run outside Codex's sandbox. For
+    anything else, the card shows the agent's text content and its whole
+    input. The command, or else the whole input, comes last, next to the
+    buttons.
     """
-    raw = getattr(tool_call, "raw_input", None)
-    details = []
-    if agent_id == "codex" and isinstance(raw, dict):
+    details = _Details()
+    title = getattr(tool_call, "title", None) or ""
+    if title and not script_is_title:
+        details.field("Request", title)
+    known = False
+    if codex_event:
         command = raw.get("command")
-        if isinstance(command, list) and command and all(isinstance(p, str) for p in command):
-            shell = os.path.basename(command[0])
-            if len(command) == 3 and command[1] in ("-c", "-lc") and shell in _SCRIPT_SHELLS:
-                details.append({
-                    "label": _command_label(command[2], f"{shell} {command[1]}"),
-                    "value": _multi_line(command[2]),
-                })
-                if command[0] != shell:
-                    details.append({"label": "Shell", "value": _single_line(command[0])})
-            else:
-                details.append({"label": "Command", "value": _multi_line(json.dumps(command, ensure_ascii=False))})
-        elif command is not None:
-            text = command if isinstance(command, str) else json.dumps(command, ensure_ascii=False)
-            details.append({"label": _command_label(text), "value": _multi_line(text)})
-        title = _single_line(getattr(tool_call, "title", None) or "")
-        for key, label in (("cwd", "Working directory"), ("grant_root", "Write access under"), ("reason", "Reason")):
-            value = raw.get(key)
-            if isinstance(value, str) and value.strip() and not (key == "reason" and _single_line(value) == title):
-                details.append({"label": label, "value": _single_line(value)})
+        for key, label in (("cwd", "Working directory"), ("grant_root", "Write access under")):
+            if isinstance(raw.get(key), str) and raw[key]:
+                known = True
+                details.field(label, raw[key])
+        reason = raw.get("reason")
+        if isinstance(reason, str) and reason.strip() and reason.strip() != title.strip():
+            known = True
+            details.field("Reason", reason)
+        changes = raw.get("changes")
+        if isinstance(changes, dict) and changes:
+            known = True
+            entries = []
+            for path, change in changes.items():
+                change = change if isinstance(change, dict) else {}
+                kind = change.get("type") if isinstance(change.get("type"), str) else "change"
+                move = change.get("move_path")
+                target = f" -> {move}" if isinstance(move, str) and move else ""
+                entries.append(details.escape_line(f"{kind}: {path}{target}"))
+            details.block("Files", "\n".join(entries))
         network = raw.get("network_approval_context")
         if isinstance(network, dict):
             parts = [p for p in (network.get("protocol"), network.get("host")) if isinstance(p, str) and p]
             if parts:
-                details.append({"label": "Network access", "value": _single_line(" ".join(parts))})
+                known = True
+                details.field("Network access", " ".join(parts))
         for key, label in (("additional_permissions", "Additional permissions"), ("permissions", "Requested permissions")):
             if raw.get(key):
-                details.append({"label": label, "value": _multi_line(_json_text(raw[key]))})
-        if details:
-            return details
-    texts = [
-        _block_text(getattr(item, "content", None))
-        for item in getattr(tool_call, "content", None) or []
-        if getattr(item, "type", None) == "content"
-    ]
-    text = "\n\n".join(t for t in texts if t)
-    if text:
-        details.append({"label": f"Details from {agent_label}", "value": _multi_line(text)})
-    if agent_id != "codex" and raw not in (None, {}, []):
-        details.append({"label": "Input", "value": _multi_line(_json_text(raw))})
+                known = True
+                details.block(label, _json_text(raw[key]))
+        if command is not None:
+            known = True
+            if runner and command[0] != runner.split(" ")[0]:
+                details.field("Shell", command[0])
+            details.block("Command", script, [f"run by {runner}"] if runner else [])
+    if not known:
+        texts = [
+            _block_text(getattr(item, "content", None))
+            for item in getattr(tool_call, "content", None) or []
+            if getattr(item, "type", None) == "content"
+        ]
+        text = "\n\n".join(t for t in texts if t)
+        if text:
+            details.block(f"Details from {agent_label}", text)
+        if raw not in (None, {}, []):
+            details.block("Input", _json_text(raw))
     return details
 
 
-def _command_parts(tool_call) -> tuple[str, str]:
-    """The whole command a permission request carries and the script it runs.
-
-    The first value is what the bidi check scans; the second is the part the
-    card compares with the title (the script for ``<shell> -c <script>``).
-    """
-    raw = getattr(tool_call, "raw_input", None)
-    command = raw.get("command") if isinstance(raw, dict) else None
-    if isinstance(command, str):
-        return command, command
-    if command is None:
-        return "", ""
-    whole = json.dumps(command, ensure_ascii=False)
-    if (
-        isinstance(command, list) and len(command) == 3
-        and all(isinstance(p, str) for p in command)
-        and command[1] in ("-c", "-lc")
-        and os.path.basename(command[0]) in _SCRIPT_SHELLS
-    ):
-        return whole, command[2]
-    return whole, whole
+def _pick_option(options, prefix: str):
+    return next((o for o in options if o.kind == f"{prefix}_once"), None) \
+        or next((o for o in options if str(o.kind).startswith(prefix)), None)
 
 
-def _strings(value):
-    """Every string inside a JSON-like value, for the invisible-character check."""
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for key, item in value.items():
-            yield from _strings(key)
-            yield from _strings(item)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            yield from _strings(item)
+def _reject(options, cancel: bool = False) -> "acp.RequestPermissionResponse":
+    reject = None if cancel else _pick_option(options, "reject")
+    if reject is not None:
+        return acp.RequestPermissionResponse(
+            outcome=schema.AllowedOutcome(outcome="selected", option_id=reject.option_id)
+        )
+    return acp.RequestPermissionResponse(outcome=schema.DeniedOutcome(outcome="cancelled"))
 
 
 def _epoch_from_iso(value) -> float:
