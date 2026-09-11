@@ -891,6 +891,14 @@ class ConfigHandler(APIHandler):
                     continue
                 has_model_change = True
             elif key == "claude_settings":
+                # The settings panel posts only the keys it renders, so merge
+                # onto the stored value instead of replacing it. Otherwise a key
+                # set by hand in config.json, such as jupyter_ui_tools_external,
+                # is erased the first time the Claude tab opens.
+                if isinstance(value, dict):
+                    stored = ai_service_manager.nbi_config.get("claude_settings")
+                    if isinstance(stored, dict):
+                        value = {**stored, **value}
                 value = apply_claude_policies(value, self.feature_policies)
                 value = apply_string_overrides(
                     value, self.string_overrides, CLAUDE_SETTINGS_OVERRIDES
