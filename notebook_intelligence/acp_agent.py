@@ -286,33 +286,25 @@ def _epoch_from_iso(value) -> float:
 # The directory pointer extension.py puts before every agent-mode prompt. Each
 # segment after the directory is optional, and the kernel display name only
 # follows the kernel name. A display name may hold one level of parentheses,
-# as in "Python 3 (ipykernel)".
+# as in "Python 3 (ipykernel)". A value or display name may also run to the
+# end without closing, where an agent truncated the title inside it.
+_POINTER_VALUE = r"[^']*(?:'|\Z)"
 _CONTEXT_POINTER = re.compile(
     re.escape(NBI_CONTEXT_PREFIX)
-    + r" '[^']*'"
-    + r"(?: and current file is: '(?P<file>[^']*)')?"
-    + r"(?: and active programming language is: '[^']*')?"
-    + r"(?P<kernel> with active kernel name: '[^']*'"
-    + r"(?: \((?:[^()]|\([^()]*\))*\))?)?"
+    + r" '" + _POINTER_VALUE
+    + r"(?: and current file is: '(?P<file>[^']*)(?:'|\Z))?"
+    + r"(?: and active programming language is: '" + _POINTER_VALUE + ")?"
+    + r"(?: with active kernel name: '" + _POINTER_VALUE
+    + r"(?: \((?:[^()]|\([^()]*(?:\)|\Z))*(?:\)|\Z))?)?"
 )
 _CONTEXT_POINTER_SEGMENTS = (
     " and current file is: '",
     " and active programming language is: '",
     " with active kernel name: '",
 )
-# codex-acp cuts a session title at 117 characters and appends this marker.
-_TITLE_TRUNCATION_MARKER = "..."
-
-
-def _is_cut_pointer_segment(tail: str, after_kernel: bool) -> bool:
-    """True when ``tail`` (the title after the pointer's complete segments,
-    truncation marker removed) is the start of one more pointer segment."""
-    for segment in _CONTEXT_POINTER_SEGMENTS:
-        if segment.startswith(tail):
-            return True
-        if tail.startswith(segment) and "'" not in tail[len(segment):]:
-            return True
-    return after_kernel and tail.startswith(" (") and tail.count("(") > tail.count(")")
+# Markers the agents append to a truncated session title: codex-acp cuts at
+# 117 characters plus "...", claude-code-acp at 127 plus a single ellipsis.
+_TITLE_TRUNCATION_MARKERS = ("...", "\u2026")
 
 
 def _strip_context_preamble(title: str) -> str:
@@ -324,11 +316,13 @@ def _strip_context_preamble(title: str) -> str:
 
     Handles both shapes: newline-separated lines, and the joined form codex
     stores (newlines collapsed to spaces, title truncated), where the
-    directory pointer is matched structurally by its quoted segments. Codex
-    truncates titles at 117 characters, which a pointer naming a file,
-    language, and kernel already fills. When nothing of the question is left,
-    the preview names the current file instead, or keeps the title if the
-    pointer has none.
+    directory pointer is matched structurally by its quoted segments. A
+    pointer naming a file and a language is already longer than the agents'
+    title limit, so a truncated title usually ends inside the pointer. When
+    nothing of the question is left, the preview names the current file (cut
+    short with the agent's marker if the title ended inside it), or is empty
+    if the title ended before the file. An untruncated title that holds only
+    context keeps the title as before.
     """
     lines = [line for line in title.splitlines() if line.strip()]
     while lines and (
@@ -340,16 +334,25 @@ def _strip_context_preamble(title: str) -> str:
     if stripped and stripped != title.strip():
         return stripped
     # Joined form: peel the directory pointer off by shape.
-    pointer = _CONTEXT_POINTER.search(title)
+    marker = next((m for m in _TITLE_TRUNCATION_MARKERS if title.endswith(m)), "")
+    body = title[: len(title) - len(marker)]
+    pointer = _CONTEXT_POINTER.search(body)
     if pointer is None:
         return title
     rest = title[pointer.end():]
-    if rest.endswith(_TITLE_TRUNCATION_MARKER) and _is_cut_pointer_segment(
-        rest[: -len(_TITLE_TRUNCATION_MARKER)], pointer.group("kernel") is not None
-    ):
+    tail = body[pointer.end():]
+    if marker and any(segment.startswith(tail) for segment in _CONTEXT_POINTER_SEGMENTS):
+        # The title ended inside the pointer: nothing after it is the question.
         rest = ""
     remainder = (title[:pointer.start()] + rest.lstrip()).strip()
-    return remainder or pointer.group("file") or title
+    if remainder:
+        return remainder
+    file = pointer.group("file")
+    if file and marker and pointer.end("file") == len(body):
+        return file + marker
+    if file:
+        return file
+    return "" if marker else title
 
 
 def _diffs_from_content(content) -> list[dict]:

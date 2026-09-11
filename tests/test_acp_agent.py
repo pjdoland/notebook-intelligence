@@ -426,7 +426,8 @@ class TestStripContextPreamble:
 
     def test_codex_title_cut_inside_the_pointer_names_the_file(self):
         # Verbatim session/list title from codex-acp 0.16.0: the pointer
-        # fills its 117 characters, so none of the question survives.
+        # fills its 117 characters, so none of the question survives. The
+        # other cut tests below exercise the matcher on shapes beyond this one.
         from notebook_intelligence.acp_agent import _strip_context_preamble
         title = (
             "Additional context: Current directory open in Jupyter is: '' "
@@ -460,13 +461,48 @@ class TestStripContextPreamble:
         )
         assert _strip_context_preamble(title) == "a.ipynb"
 
-    def test_title_cut_inside_the_file_name_keeps_the_title(self):
+    def test_title_cut_inside_the_file_path_shows_the_partial_path(self):
+        # The usual codex shape: the file value is a path from the Jupyter
+        # root, so the cut often lands inside it.
         from notebook_intelligence.acp_agent import _strip_context_preamble
         title = (
             "Additional context: Current directory open in Jupyter is: "
-            "'/home/user/projects' and current file is: 'notebooks/ana..."
+            "'projects/analytics' and current file is: 'projects/analytics/rev..."
         )
-        assert _strip_context_preamble(title) == title
+        assert _strip_context_preamble(title) == "projects/analytics/rev..."
+
+    def test_title_cut_before_any_file_is_empty(self):
+        # No document focused (for example the launcher), so the pointer has
+        # a directory and a language but no file.
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: "
+            "'notebooks/experiments' and active programming language is:..."
+        )
+        assert _strip_context_preamble(title) == ""
+
+    def test_title_cut_inside_the_directory_is_empty(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: "
+            "'home/analyst/projects/2026/quarterly-revenue-review/regional..."
+        )
+        assert _strip_context_preamble(title) == ""
+
+    def test_claude_code_acp_ellipsis_marks_a_cut(self):
+        # claude-code-acp truncates at 127 characters plus a single U+2026.
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: '' "
+            "and current file is: 'analysis.ipynb' "
+            "and active programming language is: 'python' with act\u2026"
+        )
+        assert _strip_context_preamble(title) == "analysis.ipynb"
+
+    def test_segment_text_without_a_marker_is_the_question(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = "Additional context: Current directory open in Jupyter is: '' with"
+        assert _strip_context_preamble(title) == "with"
 
     def test_truncated_question_keeps_its_marker(self):
         from notebook_intelligence.acp_agent import _strip_context_preamble
@@ -502,6 +538,17 @@ class TestStripContextPreamble:
         )
         assert _strip_context_preamble(title) == "(quick one about the loop in..."
 
+    def test_truncated_parenthesized_question_after_a_display_name_is_kept(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: '/w' "
+            "and current file is: 'nb.ipynb' "
+            "and active programming language is: 'python' "
+            "with active kernel name: 'python3' (Python 3 (ipykernel)) "
+            "(quick one about the loop in..."
+        )
+        assert _strip_context_preamble(title) == "(quick one about the loop in..."
+
     def test_pointer_after_a_hoisted_slash_command_is_stripped(self):
         # assemble_query moves a custom command in front of the context lines.
         from notebook_intelligence.acp_agent import _strip_context_preamble
@@ -511,7 +558,7 @@ class TestStripContextPreamble:
         )
         assert _strip_context_preamble(title) == "/analyze"
 
-    def test_full_pointer_with_no_question_names_the_file(self):
+    def test_untruncated_pointer_with_no_question_names_the_file(self):
         from notebook_intelligence.acp_agent import _strip_context_preamble
         title = (
             "Additional context: Current directory open in Jupyter is: '/w' "
