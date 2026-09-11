@@ -160,11 +160,11 @@ def codex_model_args(acp_settings: dict) -> list[str]:
 
 
 def codex_auth_args(api_key_env: str) -> list[str]:
-    """Codex config overrides that keep an NBI-supplied API key to Codex itself.
+    """Codex config overrides that stop Codex from spreading an NBI-supplied key.
 
     Pass the environment variable that carries the key, or "" when NBI does
     not supply one (a ChatGPT sign-in), which leaves Codex's defaults alone.
-    Without these, the key leaks three ways:
+    Without these, Codex copies the key three ways:
 
     - codex-acp's API-key authentication writes it to ``$CODEX_HOME/auth.json``,
       and once that file exists Codex keeps using the saved key, so a changed
@@ -173,6 +173,9 @@ def codex_auth_args(api_key_env: str) -> list[str]:
       ``$CODEX_HOME/shell_snapshots`` when a session starts.
     - Every command Codex runs inherits the variable, so a command (or a
       prompt that asks for one) could print it.
+
+    This does not stop a command from reading the key where it is otherwise
+    stored, such as NBI's config.json or a shell startup file that exports it.
     """
     if not api_key_env:
         return []
