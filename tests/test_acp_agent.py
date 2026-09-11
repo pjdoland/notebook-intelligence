@@ -413,6 +413,112 @@ class TestStripContextPreamble:
         )
         assert _strip_context_preamble(title) == "What does this cell do?"
 
+    def test_joined_form_with_language_and_kernel(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: '/w' "
+            "and current file is: 'nb.ipynb' "
+            "and active programming language is: 'python' "
+            "with active kernel name: 'python3' (Python 3 (ipykernel)) "
+            "What does this cell do?"
+        )
+        assert _strip_context_preamble(title) == "What does this cell do?"
+
+    def test_codex_title_cut_inside_the_pointer_names_the_file(self):
+        # Verbatim session/list title from codex-acp 0.16.0: the pointer
+        # fills its 117 characters, so none of the question survives.
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: '' "
+            "and current file is: 'analysis.py' and active programmin..."
+        )
+        assert _strip_context_preamble(title) == "analysis.py"
+
+    def test_title_cut_inside_a_quoted_value_names_the_file(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: '/w' "
+            "and current file is: 'nb.ipynb' "
+            "and active programming language is: 'pyt..."
+        )
+        assert _strip_context_preamble(title) == "nb.ipynb"
+
+    def test_title_cut_at_a_segment_boundary_names_the_file(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: '/w' "
+            "and current file is: 'nb.ipynb'..."
+        )
+        assert _strip_context_preamble(title) == "nb.ipynb"
+
+    def test_title_cut_inside_the_kernel_display_name_names_the_file(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: '' "
+            "and current file is: 'a.ipynb' "
+            "with active kernel name: 'python3' (Python 3 (ipyk..."
+        )
+        assert _strip_context_preamble(title) == "a.ipynb"
+
+    def test_title_cut_inside_the_file_name_keeps_the_title(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: "
+            "'/home/user/projects' and current file is: 'notebooks/ana..."
+        )
+        assert _strip_context_preamble(title) == title
+
+    def test_truncated_question_keeps_its_marker(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: '' "
+            "Run analysis.py and check whether the revenue totals look..."
+        )
+        assert _strip_context_preamble(title) == (
+            "Run analysis.py and check whether the revenue totals look..."
+        )
+
+    def test_question_ending_in_an_ellipsis_is_not_mistaken_for_a_cut(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: '' "
+            "and current file is: 'a.py' Wait for it..."
+        )
+        assert _strip_context_preamble(title) == "Wait for it..."
+
+    def test_parenthesized_question_without_a_kernel_is_kept(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: '' "
+            "and current file is: 'a.py' (quick one) what does line 3 do?"
+        )
+        assert _strip_context_preamble(title) == "(quick one) what does line 3 do?"
+
+    def test_truncated_parenthesized_question_without_a_kernel_is_kept(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: '' "
+            "and current file is: 'a.py' (quick one about the loop in..."
+        )
+        assert _strip_context_preamble(title) == "(quick one about the loop in..."
+
+    def test_pointer_after_a_hoisted_slash_command_is_stripped(self):
+        # assemble_query moves a custom command in front of the context lines.
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "/analyze Additional context: Current directory open in Jupyter is: '' "
+            "and current file is: 'a.py' and active programming langu..."
+        )
+        assert _strip_context_preamble(title) == "/analyze"
+
+    def test_full_pointer_with_no_question_names_the_file(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = (
+            "Additional context: Current directory open in Jupyter is: '/w' "
+            "and current file is: 'nb.ipynb'"
+        )
+        assert _strip_context_preamble(title) == "nb.ipynb"
+
 
 class TestSingleFlight:
     """The ACP session runs one prompt at a time; a second concurrent turn

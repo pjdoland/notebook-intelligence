@@ -58,7 +58,7 @@ from notebook_intelligence.acp_registry import (
     resolve_acp_agent_command,
 )
 from notebook_intelligence.base_chat_participant import BaseChatParticipant
-from notebook_intelligence.claude_sessions import CONTROL_SLASH_COMMANDS
+from notebook_intelligence.claude_sessions import CONTROL_SLASH_COMMANDS, NBI_CONTEXT_PREFIX
 from notebook_intelligence.util import ThreadSafeWebSocketConnector, get_jupyter_root_dir
 
 log = logging.getLogger(__name__)
@@ -283,6 +283,38 @@ def _epoch_from_iso(value) -> float:
         return 0
 
 
+# The directory pointer extension.py puts before every agent-mode prompt. Each
+# segment after the directory is optional, and the kernel display name only
+# follows the kernel name. A display name may hold one level of parentheses,
+# as in "Python 3 (ipykernel)".
+_CONTEXT_POINTER = re.compile(
+    re.escape(NBI_CONTEXT_PREFIX)
+    + r" '[^']*'"
+    + r"(?: and current file is: '(?P<file>[^']*)')?"
+    + r"(?: and active programming language is: '[^']*')?"
+    + r"(?P<kernel> with active kernel name: '[^']*'"
+    + r"(?: \((?:[^()]|\([^()]*\))*\))?)?"
+)
+_CONTEXT_POINTER_SEGMENTS = (
+    " and current file is: '",
+    " and active programming language is: '",
+    " with active kernel name: '",
+)
+# codex-acp cuts a session title at 117 characters and appends this marker.
+_TITLE_TRUNCATION_MARKER = "..."
+
+
+def _is_cut_pointer_segment(tail: str, after_kernel: bool) -> bool:
+    """True when ``tail`` (the title after the pointer's complete segments,
+    truncation marker removed) is the start of one more pointer segment."""
+    for segment in _CONTEXT_POINTER_SEGMENTS:
+        if segment.startswith(tail):
+            return True
+        if tail.startswith(segment) and "'" not in tail[len(segment):]:
+            return True
+    return after_kernel and tail.startswith(" (") and tail.count("(") > tail.count(")")
+
+
 def _strip_context_preamble(title: str) -> str:
     """Drop NBI's leading context lines from an agent-stored session title.
 
@@ -292,9 +324,12 @@ def _strip_context_preamble(title: str) -> str:
 
     Handles both shapes: newline-separated lines, and the joined form codex
     stores (newlines collapsed to spaces, title truncated), where the
-    directory pointer is matched structurally by its quoted segments.
+    directory pointer is matched structurally by its quoted segments. Codex
+    truncates titles at 117 characters, which a pointer naming a file,
+    language, and kernel already fills. When nothing of the question is left,
+    the preview names the current file instead, or keeps the title if the
+    pointer has none.
     """
-    from notebook_intelligence.claude_sessions import NBI_CONTEXT_PREFIX
     lines = [line for line in title.splitlines() if line.strip()]
     while lines and (
         lines[0].startswith(NBI_CONTEXT_PREFIX)
@@ -304,13 +339,17 @@ def _strip_context_preamble(title: str) -> str:
     stripped = " ".join(lines)
     if stripped and stripped != title.strip():
         return stripped
-    # Joined form: peel the directory pointer off the front by shape.
-    joined_preamble = re.compile(
-        re.escape(NBI_CONTEXT_PREFIX)
-        + r" '[^']*'( and current file is: '[^']*')?\s*"
-    )
-    remainder = joined_preamble.sub("", title, count=1)
-    return remainder.strip() or title
+    # Joined form: peel the directory pointer off by shape.
+    pointer = _CONTEXT_POINTER.search(title)
+    if pointer is None:
+        return title
+    rest = title[pointer.end():]
+    if rest.endswith(_TITLE_TRUNCATION_MARKER) and _is_cut_pointer_segment(
+        rest[: -len(_TITLE_TRUNCATION_MARKER)], pointer.group("kernel") is not None
+    ):
+        rest = ""
+    remainder = (title[:pointer.start()] + rest.lstrip()).strip()
+    return remainder or pointer.group("file") or title
 
 
 def _diffs_from_content(content) -> list[dict]:
