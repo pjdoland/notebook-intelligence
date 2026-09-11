@@ -26,9 +26,11 @@ import asyncio
 import concurrent.futures
 import contextlib
 import difflib
+import json
 import logging
 import os
 import re
+import shlex
 import sys
 import threading
 import time
@@ -198,12 +200,23 @@ class _NbiAcpClient(acp.Client):
         callback_id = f"acp-perm-{tool_call.tool_call_id}"
         title = getattr(tool_call, "title", None) or "Run this tool?"
         agent_label = self._owner.agent_spec.label
+        request = f"Approve: {title}?"
+        details = _permission_details(tool_call)
+        if details:
+            request += f"\n\n{details}"
+        escaped = _escape_bidi_controls(request)
+        if escaped != request:
+            escaped += (
+                "\n\nWarning: this request contains hidden Unicode direction "
+                "controls, shown above as \\u{...}. They can make text read "
+                "differently from what runs."
+            )
         pending_user_input = resp.stream_user_input_request(
             callback_id,
             ConfirmationData(
             title=f"{agent_label} tool call",
             message=(
-                f"Approve: {title}?\n\n"
+                f"{escaped}\n\n"
                 f"{agent_label} decides which tools to ask about, so some actions may run "
                 "without a prompt."
             ),
@@ -269,6 +282,71 @@ def _block_text(block) -> str:
     if block is None:
         return ""
     return getattr(block, "text", "") or ""
+
+
+# Same set as claude.py's; duplicated to keep this module free of the Claude
+# SDK import, like _diff_lines above.
+_BIDI_CONTROL_CODEPOINTS = frozenset(
+    {
+        0x061C,  # ARABIC LETTER MARK
+        0x200E,  # LEFT-TO-RIGHT MARK
+        0x200F,  # RIGHT-TO-LEFT MARK
+        *range(0x202A, 0x202F),  # embeddings, overrides, and pop formatting
+        *range(0x2066, 0x206A),  # directional isolates and pop isolate
+    }
+)
+
+
+def _escape_bidi_controls(text: str) -> str:
+    return "".join(
+        f"\\u{{{ord(character):04X}}}"
+        if ord(character) in _BIDI_CONTROL_CODEPOINTS
+        else character
+        for character in text
+    )
+
+
+def _permission_details(tool_call) -> str:
+    """Plain-text lines describing what an ACP permission request would do.
+
+    The request's title is the agent's own summary. codex-acp also sends the
+    exact command, its working directory, and the reason in ``raw_input``,
+    and approving can let that command run outside Codex's sandbox, so the
+    approval card shows them. The card renders its message as plain text, so
+    none of this is parsed as markdown. Other agents' text content is shown
+    when ``raw_input`` has none of these fields.
+    """
+    raw = getattr(tool_call, "raw_input", None)
+    raw = raw if isinstance(raw, dict) else {}
+    lines = []
+    command = raw.get("command")
+    if isinstance(command, list) and command and all(isinstance(p, str) for p in command):
+        if len(command) == 3 and command[1] in ("-c", "-lc"):
+            lines.append(f"Command: {command[2]}")
+            lines.append(f"Shell: {command[0]} {command[1]}")
+        else:
+            lines.append(f"Command: {shlex.join(command)}")
+    elif isinstance(command, str) and command:
+        lines.append(f"Command: {command}")
+    for key, label in (("cwd", "Working directory"), ("reason", "Reason")):
+        value = raw.get(key)
+        if isinstance(value, str) and value:
+            lines.append(f"{label}: {value}")
+    network = raw.get("network_approval_context")
+    if isinstance(network, dict) and network.get("host"):
+        lines.append(
+            f"Network access: {network.get('protocol') or ''} {network['host']}".replace("  ", " ").strip()
+        )
+    permissions = raw.get("additional_permissions")
+    if permissions:
+        lines.append(f"Additional permissions: {json.dumps(permissions, sort_keys=True)}")
+    if not lines:
+        for item in getattr(tool_call, "content", None) or []:
+            if getattr(item, "type", None) == "content":
+                text = _block_text(getattr(item, "content", None))
+                if text:
+                    lines.append(text)
+    return "\n".join(lines)
 
 
 def _epoch_from_iso(value) -> float:

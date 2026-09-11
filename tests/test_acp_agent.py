@@ -179,6 +179,143 @@ class TestPermission:
         assert isinstance(result.outcome, schema.DeniedOutcome)
 
 
+class TestPermissionDetails:
+    """The approval card shows what the request would run, not only the
+    agent's title for it."""
+
+    # A request codex-acp 0.16.0 sent when asked to write a file under the
+    # untrusted approval policy, with the cwd replaced and a few unused
+    # raw_input keys (turn id, timestamps, decision list) left out.
+    CODEX_EXEC_REQUEST = {
+        "content": [{
+            "content": {
+                "text": (
+                    "Proposed Amendment: /bin/zsh\n-lc\n"
+                    "printf 'probe\\n' > notes.txt && ls -la\n"
+                    "Available Decisions: Approved\nApprovedExecpolicyAmendment\nAbort"
+                ),
+                "type": "text",
+            },
+            "type": "content",
+        }],
+        "kind": "execute",
+        "rawInput": {
+            "call_id": "call_FZUIm4cmOofgIH2W18QSFArT",
+            "command": ["/bin/zsh", "-lc", "printf 'probe\\n' > notes.txt && ls -la"],
+            "cwd": "/work/sales-analysis",
+            "proposed_execpolicy_amendment": [
+                "/bin/zsh", "-lc", "printf 'probe\\n' > notes.txt && ls -la",
+            ],
+            "parsed_cmd": [
+                {"type": "unknown", "cmd": "printf 'probe\\n' > notes.txt && ls -la"},
+            ],
+        },
+        "status": "pending",
+        "title": "printf 'probe\\n' > notes.txt && ls -la",
+        "toolCallId": "call_FZUIm4cmOofgIH2W18QSFArT",
+    }
+
+    def _message(self, tool_call):
+        resp = FakeResponse()
+        client = _client_with_response(resp)
+        options = [
+            schema.PermissionOption(kind="allow_once", name="Allow", option_id="a1"),
+            schema.PermissionOption(kind="reject_once", name="Reject", option_id="r1"),
+        ]
+
+        async def drive():
+            task = asyncio.create_task(client.request_permission(options, "s", tool_call))
+            await asyncio.sleep(0.05)
+            card = next(
+                d for d in resp.streamed
+                if d.data_type == ResponseStreamDataType.Confirmation
+            )
+            resp.on_user_input({
+                "callback_id": f"acp-perm-{tool_call.tool_call_id}",
+                "data": {"confirmed": False},
+            })
+            await task
+            return card.message
+
+        return asyncio.run(drive())
+
+    def _request(self, **fields):
+        return schema.ToolCallUpdate.model_validate({"toolCallId": "t1", **fields})
+
+    def test_codex_exec_request_shows_the_command_and_directory(self):
+        message = self._message(
+            schema.ToolCallUpdate.model_validate(self.CODEX_EXEC_REQUEST)
+        )
+        assert "Command: printf 'probe\\n' > notes.txt && ls -la\n" in message
+        assert "Shell: /bin/zsh -lc\n" in message
+        assert "Working directory: /work/sales-analysis\n" in message
+        # codex-acp's internal decision list is not shown when raw_input has
+        # the command.
+        assert "Available Decisions" not in message
+        assert message.startswith("Approve: printf 'probe\\n' > notes.txt && ls -la?")
+        assert message.endswith("some actions may run without a prompt.")
+
+    def test_reason_network_and_permissions_are_shown(self):
+        message = self._message(self._request(
+            title="curl example.com",
+            rawInput={
+                "command": ["/bin/bash", "-c", "curl https://example.com"],
+                "cwd": "/w",
+                "reason": "Needs network access to fetch the data",
+                "network_approval_context": {"host": "example.com", "protocol": "https"},
+                "additional_permissions": {"network": True},
+            },
+        ))
+        assert "Reason: Needs network access to fetch the data" in message
+        assert "Network access: https example.com" in message
+        assert 'Additional permissions: {"network": true}' in message
+
+    def test_argv_without_a_shell_is_quoted(self):
+        message = self._message(self._request(
+            title="rm",
+            rawInput={"command": ["rm", "-rf", "my data"]},
+        ))
+        assert "Command: rm -rf 'my data'" in message
+        assert "Shell:" not in message
+
+    def test_string_command_is_shown_as_is(self):
+        message = self._message(self._request(
+            title="Bash", rawInput={"command": "ls -la && cat notes.txt"},
+        ))
+        assert "Command: ls -la && cat notes.txt" in message
+
+    def test_patch_reason_is_shown(self):
+        message = self._message(self._request(
+            title="Edit analysis.py", kind="edit",
+            rawInput={"reason": "Fix the revenue total", "changes": {}},
+        ))
+        assert "Reason: Fix the revenue total" in message
+
+    def test_text_content_is_the_fallback_without_raw_input(self):
+        message = self._message(self._request(
+            title="Fetch",
+            content=[{"type": "content", "content": {"type": "text", "text": "GET https://example.com"}}],
+        ))
+        assert "GET https://example.com" in message
+
+    def test_no_details_keeps_the_title_only_card(self):
+        message = self._message(self._request(title="Run echo"))
+        assert message == (
+            "Approve: Run echo?\n\n"
+            "Codex decides which tools to ask about, so some actions may run "
+            "without a prompt."
+        )
+
+    def test_bidi_controls_are_made_visible_with_a_warning(self):
+        message = self._message(self._request(
+            title="Run a script",
+            rawInput={"command": "echo safe \u202e; rm -rf ~ #"},
+        ))
+        assert "\u202e" not in message
+        assert "Command: echo safe \\u{202E}; rm -rf ~ #" in message
+        assert "hidden Unicode direction controls" in message
+
+
 class TestPolicyClamp:
     def test_force_off_clamps_enabled(self):
         from notebook_intelligence.feature_flags import apply_acp_policies

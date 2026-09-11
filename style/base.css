@@ -881,6 +881,11 @@ pre:has(.code-block-header) {
   line-height: 20px;
 }
 
+.chat-confirmation-message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .chat-confirmation-form button {
   height: 24px;
   line-height: 24px;

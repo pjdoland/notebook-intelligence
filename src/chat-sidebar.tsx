@@ -1009,7 +1009,9 @@ function ChatResponse(props: any) {
                     </div>
                   ) : null}
                   {item.content.message ? (
-                    <div>{item.content.message}</div>
+                    <div className="chat-confirmation-message">
+                      {item.content.message}
+                    </div>
                   ) : null}
                   <button
                     className="jp-Dialog-button jp-mod-accept jp-mod-styled"
