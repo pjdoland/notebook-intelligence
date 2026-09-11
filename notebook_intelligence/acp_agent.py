@@ -230,23 +230,18 @@ class _NbiAcpClient(acp.Client):
             )
         return acp.RequestPermissionResponse(outcome=schema.DeniedOutcome(outcome="cancelled"))
 
-    # fs/*: implemented so an agent that delegates file ops (e.g. claude-acp)
-    # routes through NBI. codex-acp self-applies, so these may not fire for it.
+    # fs/*: not offered. These would run in the Jupyter server process, outside
+    # any agent sandbox, so an agent that delegated file I/O here could escape
+    # its own sandbox, for example by swapping a path for a symlink between a
+    # containment check and the write. Agents do their own file I/O instead:
+    # codex-acp always does, and claude-code-acp keeps its own file tools when
+    # the capability is not advertised. The acp router registers these handlers
+    # whatever NBI advertises, so they must refuse rather than go unused.
     async def read_text_file(self, path, session_id, limit=None, line=None, **kw):
-        try:
-            with open(path, encoding="utf-8") as f:
-                return acp.ReadTextFileResponse(content=f.read())
-        except Exception as e:
-            raise acp.RequestError.internal_error(str(e))
+        raise acp.RequestError.method_not_found("fs not supported")
 
     async def write_text_file(self, content, path, session_id, **kw):
-        try:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
-            return acp.WriteTextFileResponse()
-        except Exception as e:
-            raise acp.RequestError.internal_error(str(e))
+        raise acp.RequestError.method_not_found("fs not supported")
 
     # terminal/*: not emulated in Phase 1 (Codex runs shell internally).
     async def create_terminal(self, command, session_id, **kw):
@@ -439,7 +434,7 @@ class AcpAgentClient:
             init = await self._conn.initialize(
                 protocol_version=acp.PROTOCOL_VERSION,
                 client_capabilities=schema.ClientCapabilities(
-                    fs=schema.FileSystemCapabilities(read_text_file=True, write_text_file=True),
+                    fs=schema.FileSystemCapabilities(read_text_file=False, write_text_file=False),
                 ),
                 client_info=schema.Implementation(name="notebook-intelligence", version="1.0.0"),
             )

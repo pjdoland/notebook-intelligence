@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import acp
 from acp import schema
 
 from notebook_intelligence.acp_agent import (
@@ -315,6 +316,79 @@ class TestCodexModelArgs:
             "-c", 'model="m1"',
             "-c", 'openai_base_url="http://proxy/v1"',
         ]
+
+
+class TestClientFileSystemNotOffered:
+    """NBI does not serve ``fs/read_text_file`` or ``fs/write_text_file``.
+
+    They would run in the Jupyter server process, outside any agent sandbox,
+    so a delegating agent could use them to escape its own sandbox. The acp
+    router registers the handlers regardless of the advertised capability, so
+    both the advertisement and the handlers themselves are pinned."""
+
+    @staticmethod
+    def _client():
+        return _client_with_response(None)
+
+    def test_read_is_refused_without_touching_the_file(self, tmp_path):
+        target = tmp_path / "notes.txt"
+        target.write_text("SECRET-CONTENT-7F3A", encoding="utf-8")
+
+        with pytest.raises(acp.RequestError) as excinfo:
+            asyncio.run(self._client().read_text_file(path=str(target), session_id="s"))
+
+        assert excinfo.value.to_error_obj()["code"] == -32601
+
+    def test_write_is_refused_without_creating_the_file(self, tmp_path):
+        target = tmp_path / "new" / "planted.txt"
+
+        with pytest.raises(acp.RequestError) as excinfo:
+            asyncio.run(self._client().write_text_file(
+                content="planted", path=str(target), session_id="s",
+            ))
+
+        assert excinfo.value.to_error_obj()["code"] == -32601
+        assert not (tmp_path / "new").exists()
+
+    def test_initialize_does_not_advertise_fs(self, tmp_path, monkeypatch):
+        import notebook_intelligence.acp_agent as mod
+
+        captured = {}
+
+        class FakeProc:
+            stdin = stdout = object()
+            stderr = None
+            returncode = None
+
+            def terminate(self):
+                self.returncode = 0
+
+            async def wait(self):
+                return 0
+
+        async def fake_exec(*cmd, **kw):
+            return FakeProc()
+
+        class FakeConn:
+            async def initialize(self, **kw):
+                captured["capabilities"] = kw["client_capabilities"]
+                raise RuntimeError("test: capabilities captured, session not started")
+
+        monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(mod.acp, "connect_to_agent", lambda *a, **k: FakeConn())
+        client = mod.AcpAgentClient(SimpleNamespace(
+            websocket_connector=None,
+            nbi_config=SimpleNamespace(
+                acp_settings={"enabled": True, "agent": "codex"},
+                nbi_user_dir=str(tmp_path),
+            ),
+        ))
+
+        asyncio.run(client._serve())
+
+        fs = captured["capabilities"].fs
+        assert fs.read_text_file is False
+        assert fs.write_text_file is False
 
 
 class TestAssembleQuery:
