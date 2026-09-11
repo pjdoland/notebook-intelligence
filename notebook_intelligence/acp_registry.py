@@ -9,7 +9,7 @@ startup path and loads only when ACP mode is actually used.
 
 Adding an agent type is a registry entry: its adapter package, display
 metadata, and how it authenticates. Agent-specific launch quirks that do not
-generalize (Codex's approval-policy pin, its CODEX_HOME isolation) stay keyed
+generalize (Codex's approval and sandbox pins, its CODEX_HOME isolation) stay keyed
 off the spec id in ``acp_agent`` rather than growing fields prematurely.
 """
 
@@ -96,7 +96,7 @@ def resolve_acp_agent_command(spec: AcpAgentSpec) -> list[str]:
 
 
 def codex_approval_args(full_access: bool) -> list[str]:
-    """Codex config overrides that pin its approval posture.
+    """Codex config overrides that pin its approval and sandbox posture.
 
     Default (``full_access`` off) forces ``approval_policy = untrusted`` so
     Codex asks before anything beyond trusted read-only commands, surfacing the
@@ -105,20 +105,21 @@ def codex_approval_args(full_access: bool) -> list[str]:
     flags are honored by the codex-acp binary's ``-c key=value`` override, so
     they work for both API-key and ChatGPT-auth sessions.
 
-    Full access also pins ``sandbox_mode = workspace-write``. Codex runs an
-    untrusted project in a read-only sandbox, which is always the case in the
-    isolated API-key ``CODEX_HOME``, and under ``approval_policy = never``
-    nothing can be approved past it, so without this pin full access refuses
-    every edit.
-    ``workspace-write`` allows writes to the workspace and temp directories and
-    leaves outbound network access off unless Codex's own config enables it.
+    Full access also pins ``sandbox_mode = workspace-write``. Codex gives a
+    project with no trust entry a read-only sandbox, which is always the case
+    in the isolated API-key ``CODEX_HOME``, and under ``approval_policy =
+    never`` nothing can be approved past it, so without this pin full access
+    refuses every edit. ``workspace-write`` limits writes to the workspace and
+    temp directories and keeps outbound network access off, unless Codex's own
+    config widens the sandbox.
 
-    The override takes precedence over the codex config file. In the API-key
-    path NBI also isolates ``CODEX_HOME`` (see ``AcpAgentClient._child_env``),
-    so the config base is NBI-controlled and neither the workspace nor the
-    user's ~/.codex is read. With ChatGPT auth, codex uses the user's own
-    ~/.codex; the ``-c`` pin still overrides its top-level approval_policy.
-    See the admin guide for the residual caveat on shared deployments.
+    The overrides take precedence over Codex's user and project config, though
+    not over managed config. In the API-key path NBI also isolates
+    ``CODEX_HOME`` (see ``AcpAgentClient._child_env``), so the config base is
+    NBI-controlled and neither the workspace nor the user's ~/.codex is read.
+    With ChatGPT auth, codex uses the user's own ~/.codex; the ``-c`` pins
+    still override its top-level ``approval_policy`` and ``sandbox_mode``. See
+    the admin guide for the residual caveats on shared deployments.
     """
     if full_access:
         return [

@@ -222,10 +222,6 @@ class TestApprovalArgs:
         args = codex_approval_args(False)
         assert args == ["-c", 'approval_policy="untrusted"']
 
-    def test_default_leaves_the_sandbox_to_codex(self):
-        from notebook_intelligence.acp_agent import codex_approval_args
-        assert not any("sandbox_mode" in a for a in codex_approval_args(False))
-
     def test_full_access_runs_unattended_with_a_writable_workspace(self):
         """Full access must pin a writable sandbox, not only stop asking.
 
@@ -297,67 +293,88 @@ class TestCodexModelArgs:
     def test_serve_appends_overrides_to_launch_cmd(self, tmp_path):
         """Pin the delivery, not just the mapping: the original bug was
         settings that never reached the launch command at all."""
-        import notebook_intelligence.acp_agent as mod
+        cmd = _captured_launch_cmd(SimpleNamespace(
+            acp_settings={
+                "enabled": True, "agent": "codex",
+                "chat_model": "m1", "base_url": "http://proxy/v1",
+                "full_access": False,
+            },
+            nbi_user_dir=str(tmp_path),
+        ))
 
-        host = SimpleNamespace(
-            websocket_connector=None,
-            nbi_config=SimpleNamespace(
-                acp_settings={
-                    "enabled": True, "agent": "codex",
-                    "chat_model": "m1", "base_url": "http://proxy/v1",
-                    "full_access": False,
-                },
-                nbi_user_dir=str(tmp_path),
-            ),
-        )
-        client = mod.AcpAgentClient(host)
-        captured = {}
-
-        async def fake_exec(*cmd, **kw):
-            captured["cmd"] = list(cmd)
-            raise RuntimeError("captured; abort launch")
-
-        orig = mod.asyncio.create_subprocess_exec
-        mod.asyncio.create_subprocess_exec = fake_exec
-        try:
-            asyncio.run(client._serve())
-        finally:
-            mod.asyncio.create_subprocess_exec = orig
-
-        assert captured["cmd"][-6:] == [
+        assert cmd[-6:] == [
             "-c", 'approval_policy="untrusted"',
             "-c", 'model="m1"',
             "-c", 'openai_base_url="http://proxy/v1"',
         ]
 
-    def test_serve_launches_full_access_with_a_writable_sandbox(self, tmp_path):
-        import notebook_intelligence.acp_agent as mod
 
-        host = SimpleNamespace(
-            websocket_connector=None,
-            nbi_config=SimpleNamespace(
-                acp_settings={"enabled": True, "agent": "codex", "full_access": True},
-                nbi_user_dir=str(tmp_path),
-            ),
-        )
-        client = mod.AcpAgentClient(host)
-        captured = {}
+def _captured_launch_cmd(nbi_config):
+    """Run ``AcpAgentClient._serve`` just far enough to capture its argv."""
+    import notebook_intelligence.acp_agent as mod
 
-        async def fake_exec(*cmd, **kw):
-            captured["cmd"] = list(cmd)
-            raise RuntimeError("captured; abort launch")
+    host = SimpleNamespace(websocket_connector=None, nbi_config=nbi_config)
+    client = mod.AcpAgentClient(host)
+    captured = {}
 
-        orig = mod.asyncio.create_subprocess_exec
-        mod.asyncio.create_subprocess_exec = fake_exec
-        try:
-            asyncio.run(client._serve())
-        finally:
-            mod.asyncio.create_subprocess_exec = orig
+    async def fake_exec(*cmd, **kw):
+        captured["cmd"] = list(cmd)
+        raise RuntimeError("captured; abort launch")
 
-        assert captured["cmd"][-4:] == [
-            "-c", 'approval_policy="never"',
-            "-c", 'sandbox_mode="workspace-write"',
-        ]
+    orig = mod.asyncio.create_subprocess_exec
+    mod.asyncio.create_subprocess_exec = fake_exec
+    try:
+        asyncio.run(client._serve())
+    finally:
+        mod.asyncio.create_subprocess_exec = orig
+    return captured["cmd"]
+
+
+class TestFullAccessLaunch:
+    """Full access reaches the launch command as a writable sandbox, and only
+    when the effective, policy-clamped setting allows it."""
+
+    _FULL_ACCESS_PINS = [
+        "-c", 'approval_policy="never"',
+        "-c", 'sandbox_mode="workspace-write"',
+    ]
+
+    def test_full_access_launches_with_a_writable_sandbox(self, tmp_path):
+        cmd = _captured_launch_cmd(SimpleNamespace(
+            acp_settings={"enabled": True, "agent": "codex", "full_access": True},
+            nbi_user_dir=str(tmp_path),
+        ))
+        assert cmd[-4:] == self._FULL_ACCESS_PINS
+
+    def test_force_off_keeps_a_stored_full_access_off(self, mock_nbi_config):
+        """A stored ``full_access: true`` must not reach the launch command
+        while the policy is force-off; it would now grant workspace writes."""
+        mock_nbi_config.user_config["acp_settings"] = {
+            "enabled": True, "agent": "codex", "full_access": True,
+        }
+        mock_nbi_config.set_feature_policies({"acp_full_access": "force-off"}, {})
+        cmd = _captured_launch_cmd(mock_nbi_config)
+        assert cmd[-2:] == ["-c", 'approval_policy="untrusted"']
+        assert not any("sandbox_mode" in arg for arg in cmd)
+
+    def test_force_on_turns_full_access_on(self, mock_nbi_config):
+        mock_nbi_config.user_config["acp_settings"] = {
+            "enabled": True, "agent": "codex", "full_access": False,
+        }
+        mock_nbi_config.set_feature_policies({"acp_full_access": "force-on"}, {})
+        cmd = _captured_launch_cmd(mock_nbi_config)
+        assert cmd[-4:] == self._FULL_ACCESS_PINS
+
+    def test_agent_command_override_keeps_the_pins(self, tmp_path, monkeypatch):
+        """An admin-pinned adapter binary must not lose the approval and
+        sandbox posture."""
+        monkeypatch.setenv("NBI_ACP_AGENT_COMMAND", "/opt/codex-acp --verbose")
+        cmd = _captured_launch_cmd(SimpleNamespace(
+            acp_settings={"enabled": True, "agent": "codex", "full_access": True},
+            nbi_user_dir=str(tmp_path),
+        ))
+        assert cmd[:2] == ["/opt/codex-acp", "--verbose"]
+        assert cmd[-4:] == self._FULL_ACCESS_PINS
 
 
 class TestAssembleQuery:
