@@ -426,8 +426,7 @@ class TestStripContextPreamble:
 
     def test_codex_title_cut_inside_the_pointer_names_the_file(self):
         # Verbatim session/list title from codex-acp 0.16.0: the pointer
-        # fills its 117 characters, so none of the question survives. The
-        # other cut tests below exercise the matcher on shapes beyond this one.
+        # fills its 117 characters, so none of the question survives.
         from notebook_intelligence.acp_agent import _strip_context_preamble
         title = (
             "Additional context: Current directory open in Jupyter is: '' "
@@ -435,7 +434,123 @@ class TestStripContextPreamble:
         )
         assert _strip_context_preamble(title) == "analysis.py"
 
-    def test_title_cut_inside_a_quoted_value_names_the_file(self):
+    # The titles below are built from a pointer shaped like extension.py's
+    # and truncated the way each agent truncates, so each is one the picker
+    # can actually receive.
+
+    def test_codex_title_names_the_file_relative_to_the_directory(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = _codex_title(_prompt(
+            "notebooks", "notebooks/eda.ipynb", "python", "python3",
+            "Python 3 (ipykernel)", question="Summarize the data",
+        ))
+        assert _strip_context_preamble(title) == "eda.ipynb"
+
+    def test_codex_title_cut_inside_the_file_name_shows_the_partial_name(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = _codex_title(_prompt(
+            "reports", "reports/2026-q3-regional-summary.ipynb", "python",
+            question="Summarize the data",
+        ))
+        assert _strip_context_preamble(title) == "2026-q3-regional-su..."
+
+    def test_codex_title_cut_before_the_file_name_names_the_directory(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = _codex_title(_prompt(
+            "projects/analytics", "projects/analytics/revenue.ipynb", "python",
+            question="Summarize the data",
+        ))
+        assert _strip_context_preamble(title) == "projects/analytics"
+
+    def test_codex_title_file_outside_the_directory_keeps_its_path(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = _codex_title(_prompt(
+            "notebooks", "data/load.py", "python", question="Summarize the data",
+        ))
+        assert _strip_context_preamble(title) == "data/load.py"
+
+    def test_codex_title_file_named_like_the_start_of_the_directory_keeps_its_name(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = _codex_title(_prompt(
+            "notes-archive", "notes", "python", question="Summarize the data",
+        ))
+        assert _strip_context_preamble(title) == "notes"
+
+    def test_codex_title_cut_before_any_file_names_the_directory(self):
+        # No document focused (for example the launcher): the pointer has a
+        # directory and a language but no file.
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = _codex_title(_prompt(
+            "notebooks/experiments/2026", language="python",
+            question="Summarize the data",
+        ))
+        assert _strip_context_preamble(title) == "notebooks/experiments/2026"
+
+    def test_codex_title_cut_inside_the_file_label_names_the_directory(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = _codex_title(_prompt(
+            "home/analyst/projects/2026/quarterly",
+            "home/analyst/projects/2026/quarterly/a.ipynb", "python", "python3",
+            "Python 3 (ipykernel)", question="Summarize the data",
+        ))
+        assert _strip_context_preamble(title) == "home/analyst/projects/2026/quarterly"
+
+    def test_codex_title_cut_inside_the_kernel_label_with_no_directory_is_empty(self):
+        # Notebook generation sends no file and an empty directory.
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = _codex_title(_prompt(
+            "", language="python", kernel="python3", display="Python 3 (ipykernel)",
+            question="Create a notebook that plots revenue",
+        ))
+        assert _strip_context_preamble(title) == ""
+
+    def test_codex_title_cut_inside_the_directory_is_empty(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = _codex_title(_prompt(
+            "home/analyst/projects/2026/quarterly-revenue-review/regional",
+            "home/analyst/projects/2026/quarterly-revenue-review/regional/a.ipynb",
+            "python", question="Summarize the data",
+        ))
+        assert _strip_context_preamble(title) == ""
+
+    def test_codex_title_keeps_a_truncated_question(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = _codex_title(_prompt(
+            "", language="python",
+            question="Run analysis.py and check whether the revenue totals "
+            "look right, then fix anything that is wrong",
+        ))
+        assert _strip_context_preamble(title) == "Run analysi..."
+
+    def test_claude_code_acp_title_names_the_file(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = _claude_code_acp_title(_prompt(
+            "", "analysis.ipynb", "python", "python3", "Python 3 (ipykernel)",
+            question="Summarize the data",
+        ))
+        assert _strip_context_preamble(title) == "analysis.ipynb"
+
+    def test_claude_code_acp_title_cut_inside_the_file_name(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = _claude_code_acp_title(_prompt(
+            "", "quarterly-revenue-review-by-region-and-product-line.ipynb",
+            "python", question="Summarize the data",
+        ))
+        assert _strip_context_preamble(title) == (
+            "quarterly-revenue-review-by-region-and-produ\u2026"
+        )
+
+    def test_hoisted_slash_command_before_the_pointer_is_kept(self):
+        # assemble_query moves a custom command in front of the context lines.
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = _codex_title("/analyze\n" + _prompt(
+            "", "analysis.py", "python", question="",
+        ))
+        assert _strip_context_preamble(title) == "/analyze"
+
+    # Shapes the agents do not produce, pinning the matcher on its own.
+
+    def test_cut_inside_a_quoted_value_names_the_file(self):
         from notebook_intelligence.acp_agent import _strip_context_preamble
         title = (
             "Additional context: Current directory open in Jupyter is: '/w' "
@@ -444,7 +559,7 @@ class TestStripContextPreamble:
         )
         assert _strip_context_preamble(title) == "nb.ipynb"
 
-    def test_title_cut_at_a_segment_boundary_names_the_file(self):
+    def test_cut_at_a_segment_boundary_names_the_file(self):
         from notebook_intelligence.acp_agent import _strip_context_preamble
         title = (
             "Additional context: Current directory open in Jupyter is: '/w' "
@@ -452,7 +567,7 @@ class TestStripContextPreamble:
         )
         assert _strip_context_preamble(title) == "nb.ipynb"
 
-    def test_title_cut_inside_the_kernel_display_name_names_the_file(self):
+    def test_cut_inside_the_kernel_display_name_names_the_file(self):
         from notebook_intelligence.acp_agent import _strip_context_preamble
         title = (
             "Additional context: Current directory open in Jupyter is: '' "
@@ -461,59 +576,6 @@ class TestStripContextPreamble:
         )
         assert _strip_context_preamble(title) == "a.ipynb"
 
-    def test_title_cut_inside_the_file_path_shows_the_partial_path(self):
-        # The usual codex shape: the file value is a path from the Jupyter
-        # root, so the cut often lands inside it.
-        from notebook_intelligence.acp_agent import _strip_context_preamble
-        title = (
-            "Additional context: Current directory open in Jupyter is: "
-            "'projects/analytics' and current file is: 'projects/analytics/rev..."
-        )
-        assert _strip_context_preamble(title) == "projects/analytics/rev..."
-
-    def test_title_cut_before_any_file_is_empty(self):
-        # No document focused (for example the launcher), so the pointer has
-        # a directory and a language but no file.
-        from notebook_intelligence.acp_agent import _strip_context_preamble
-        title = (
-            "Additional context: Current directory open in Jupyter is: "
-            "'notebooks/experiments' and active programming language is:..."
-        )
-        assert _strip_context_preamble(title) == ""
-
-    def test_title_cut_inside_the_directory_is_empty(self):
-        from notebook_intelligence.acp_agent import _strip_context_preamble
-        title = (
-            "Additional context: Current directory open in Jupyter is: "
-            "'home/analyst/projects/2026/quarterly-revenue-review/regional..."
-        )
-        assert _strip_context_preamble(title) == ""
-
-    def test_claude_code_acp_ellipsis_marks_a_cut(self):
-        # claude-code-acp truncates at 127 characters plus a single U+2026.
-        from notebook_intelligence.acp_agent import _strip_context_preamble
-        title = (
-            "Additional context: Current directory open in Jupyter is: '' "
-            "and current file is: 'analysis.ipynb' "
-            "and active programming language is: 'python' with act\u2026"
-        )
-        assert _strip_context_preamble(title) == "analysis.ipynb"
-
-    def test_segment_text_without_a_marker_is_the_question(self):
-        from notebook_intelligence.acp_agent import _strip_context_preamble
-        title = "Additional context: Current directory open in Jupyter is: '' with"
-        assert _strip_context_preamble(title) == "with"
-
-    def test_truncated_question_keeps_its_marker(self):
-        from notebook_intelligence.acp_agent import _strip_context_preamble
-        title = (
-            "Additional context: Current directory open in Jupyter is: '' "
-            "Run analysis.py and check whether the revenue totals look..."
-        )
-        assert _strip_context_preamble(title) == (
-            "Run analysis.py and check whether the revenue totals look..."
-        )
-
     def test_question_ending_in_an_ellipsis_is_not_mistaken_for_a_cut(self):
         from notebook_intelligence.acp_agent import _strip_context_preamble
         title = (
@@ -521,6 +583,11 @@ class TestStripContextPreamble:
             "and current file is: 'a.py' Wait for it..."
         )
         assert _strip_context_preamble(title) == "Wait for it..."
+
+    def test_segment_text_without_a_marker_is_the_question(self):
+        from notebook_intelligence.acp_agent import _strip_context_preamble
+        title = "Additional context: Current directory open in Jupyter is: '' with"
+        assert _strip_context_preamble(title) == "with"
 
     def test_parenthesized_question_without_a_kernel_is_kept(self):
         from notebook_intelligence.acp_agent import _strip_context_preamble
@@ -549,15 +616,6 @@ class TestStripContextPreamble:
         )
         assert _strip_context_preamble(title) == "(quick one about the loop in..."
 
-    def test_pointer_after_a_hoisted_slash_command_is_stripped(self):
-        # assemble_query moves a custom command in front of the context lines.
-        from notebook_intelligence.acp_agent import _strip_context_preamble
-        title = (
-            "/analyze Additional context: Current directory open in Jupyter is: '' "
-            "and current file is: 'a.py' and active programming langu..."
-        )
-        assert _strip_context_preamble(title) == "/analyze"
-
     def test_untruncated_pointer_with_no_question_names_the_file(self):
         from notebook_intelligence.acp_agent import _strip_context_preamble
         title = (
@@ -565,6 +623,35 @@ class TestStripContextPreamble:
             "and current file is: 'nb.ipynb'"
         )
         assert _strip_context_preamble(title) == "nb.ipynb"
+
+
+def _prompt(directory, file="", language="", kernel="", display="", question=""):
+    """A first prompt shaped like extension.py's: the pointer, then the question."""
+    from notebook_intelligence.claude_sessions import NBI_CONTEXT_PREFIX
+    pointer = f"{NBI_CONTEXT_PREFIX} '{directory}'"
+    if file:
+        pointer += f" and current file is: '{file}'"
+    if language:
+        pointer += f" and active programming language is: '{language}'"
+    if kernel:
+        pointer += f" with active kernel name: '{kernel}'"
+    if display:
+        pointer += f" ({display})"
+    return f"{pointer}\n{question}" if question else pointer
+
+
+def _codex_title(prompt):
+    """codex-acp's session title for ASCII text (it counts graphemes): newlines
+    as spaces, 117 characters plus "..."."""
+    text = prompt.replace("\r", " ").replace("\n", " ").strip()
+    return text if len(text) <= 120 else text[:117] + "..."
+
+
+def _claude_code_acp_title(prompt):
+    """claude-code-acp's sanitizeTitle for ASCII text (it counts UTF-16 units):
+    whitespace collapsed, 127 characters plus U+2026."""
+    text = " ".join(prompt.split())
+    return text if len(text) <= 128 else text[:127] + "\u2026"
 
 
 class TestSingleFlight:

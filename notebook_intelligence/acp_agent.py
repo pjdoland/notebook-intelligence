@@ -291,7 +291,7 @@ def _epoch_from_iso(value) -> float:
 _POINTER_VALUE = r"[^']*(?:'|\Z)"
 _CONTEXT_POINTER = re.compile(
     re.escape(NBI_CONTEXT_PREFIX)
-    + r" '" + _POINTER_VALUE
+    + r" '(?P<dir>[^']*)(?:'|\Z)"
     + r"(?: and current file is: '(?P<file>[^']*)(?:'|\Z))?"
     + r"(?: and active programming language is: '" + _POINTER_VALUE + ")?"
     + r"(?: with active kernel name: '" + _POINTER_VALUE
@@ -319,10 +319,12 @@ def _strip_context_preamble(title: str) -> str:
     directory pointer is matched structurally by its quoted segments. A
     pointer naming a file and a language is already longer than the agents'
     title limit, so a truncated title usually ends inside the pointer. When
-    nothing of the question is left, the preview names the current file (cut
-    short with the agent's marker if the title ended inside it), or is empty
-    if the title ended before the file. An untruncated title that holds only
-    context keeps the title as before.
+    nothing of the question is left, the preview names the current file,
+    relative to the open directory and cut short with the agent's marker if
+    the title ended inside it. If the cut left none of the file's own name, or
+    came before any file, the preview names the directory when the title holds
+    all of it, and is empty otherwise. A title with no file and no question
+    that was not truncated is kept as before.
     """
     lines = [line for line in title.splitlines() if line.strip()]
     while lines and (
@@ -347,12 +349,23 @@ def _strip_context_preamble(title: str) -> str:
     remainder = (title[:pointer.start()] + rest.lstrip()).strip()
     if remainder:
         return remainder
+    directory = pointer.group("dir")
     file = pointer.group("file")
-    if file and marker and pointer.end("file") == len(body):
-        return file + marker
-    if file:
-        return file
-    return "" if marker else title
+    if not file:
+        if not marker:
+            return title
+        return directory if pointer.end("dir") < len(body) else ""
+    file_cut = bool(marker) and pointer.end("file") == len(body)
+    # The file path starts from the Jupyter root and usually repeats the
+    # open directory, which would otherwise use up the whole preview.
+    inside = f"{directory}/" if directory else ""
+    if inside and file.startswith(inside):
+        file = file[len(inside):]
+    elif inside and file_cut and inside.startswith(file):
+        file = ""
+    if not file:
+        return directory
+    return file + marker if file_cut else file
 
 
 def _diffs_from_content(content) -> list[dict]:
