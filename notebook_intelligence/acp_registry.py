@@ -157,3 +157,27 @@ def codex_model_args(acp_settings: dict) -> list[str]:
     if base_url:
         args += ["-c", f"openai_base_url={_codex_toml_string(base_url)}"]
     return args
+
+
+def codex_auth_args(api_key_env: str) -> list[str]:
+    """Codex config overrides that keep an NBI-supplied API key to Codex itself.
+
+    Pass the environment variable that carries the key, or "" when NBI does
+    not supply one (a ChatGPT sign-in), which leaves Codex's defaults alone.
+    Without these, the key leaks three ways:
+
+    - codex-acp's API-key authentication writes it to ``$CODEX_HOME/auth.json``,
+      and once that file exists Codex keeps using the saved key, so a changed
+      key had no effect. The ephemeral store holds it in memory instead.
+    - Codex snapshots the shell environment, key included, to
+      ``$CODEX_HOME/shell_snapshots`` when a session starts.
+    - Every command Codex runs inherits the variable, so a command (or a
+      prompt that asks for one) could print it.
+    """
+    if not api_key_env:
+        return []
+    return [
+        "-c", 'cli_auth_credentials_store="ephemeral"',
+        "-c", "features.shell_snapshot=false",
+        "-c", f"shell_environment_policy.exclude=[{_codex_toml_string(api_key_env)}]",
+    ]

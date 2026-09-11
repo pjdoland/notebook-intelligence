@@ -53,6 +53,7 @@ from notebook_intelligence import perf
 from notebook_intelligence.acp_registry import (
     AcpAgentSpec,
     codex_approval_args,
+    codex_auth_args,
     codex_model_args,
     resolve_acp_agent,
     resolve_acp_agent_command,
@@ -265,6 +266,29 @@ class _NbiAcpClient(acp.Client):
         return None
 
 
+def _remove_persisted_codex_credentials(codex_home: str) -> None:
+    """Delete key copies earlier NBI versions let Codex write to its CODEX_HOME.
+
+    That directory is only used when NBI supplies the API key, so its
+    ``auth.json`` and shell snapshots only ever held keys NBI passed in.
+    Codex no longer writes either (``codex_auth_args``), but old files would
+    otherwise stay on disk with a possibly outdated key.
+    """
+    paths = [os.path.join(codex_home, "auth.json")]
+    snapshots = os.path.join(codex_home, "shell_snapshots")
+    if os.path.isdir(snapshots):
+        paths += [os.path.join(snapshots, name) for name in os.listdir(snapshots)]
+    for path in paths:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            log.warning("Could not remove the saved Codex credential at %s: %s", path, e)
+            continue
+        log.info("Removed the saved Codex credential at %s", path)
+
+
 def _block_text(block) -> str:
     if block is None:
         return ""
@@ -425,6 +449,7 @@ class AcpAgentClient:
             # NBI_ACP_CHAT_MODEL env overrides (ACP_SETTINGS_OVERRIDES),
             # so these -c flags are the single delivery path to codex.
             cmd += codex_model_args(self.acp_settings)
+            cmd += codex_auth_args(spec.api_key_env if self._api_key(spec) else "")
         log.info("Starting ACP agent (%s): %s", spec.id, " ".join(cmd))
         try:
             self._proc = await asyncio.create_subprocess_exec(
@@ -479,6 +504,7 @@ class AcpAgentClient:
                     self._host.nbi_config.nbi_user_dir, "codex-home"
                 )
                 os.makedirs(env["CODEX_HOME"], exist_ok=True)
+                _remove_persisted_codex_credentials(env["CODEX_HOME"])
         return env
 
     async def _authenticate(self, init):

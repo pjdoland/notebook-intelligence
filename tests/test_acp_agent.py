@@ -280,10 +280,12 @@ class TestCodexModelArgs:
         from notebook_intelligence.acp_registry import codex_model_args
         assert codex_model_args({"chat_model": "\x08", "base_url": "\x01\x02"}) == []
 
-    def test_serve_appends_overrides_to_launch_cmd(self, tmp_path):
+    def test_serve_appends_overrides_to_launch_cmd(self, tmp_path, monkeypatch):
         """Pin the delivery, not just the mapping: the original bug was
         settings that never reached the launch command at all."""
         import notebook_intelligence.acp_agent as mod
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
         host = SimpleNamespace(
             websocket_connector=None,
@@ -315,6 +317,96 @@ class TestCodexModelArgs:
             "-c", 'model="m1"',
             "-c", 'openai_base_url="http://proxy/v1"',
         ]
+
+
+class TestCodexKeyNotPersisted:
+    """An API key NBI gives Codex stays with Codex. By default codex-acp wrote
+    it to CODEX_HOME/auth.json and kept using that saved key after it changed,
+    Codex's shell snapshots wrote it to disk, and every command Codex ran could
+    read it."""
+
+    AUTH_ARGS = [
+        "-c", 'cli_auth_credentials_store="ephemeral"',
+        "-c", "features.shell_snapshot=false",
+        "-c", 'shell_environment_policy.exclude=["OPENAI_API_KEY"]',
+    ]
+
+    def _launch(self, tmp_path, acp_settings):
+        import notebook_intelligence.acp_agent as mod
+
+        host = SimpleNamespace(
+            websocket_connector=None,
+            nbi_config=SimpleNamespace(
+                acp_settings={"enabled": True, "agent": "codex", "full_access": False, **acp_settings},
+                nbi_user_dir=str(tmp_path),
+            ),
+        )
+        client = mod.AcpAgentClient(host)
+        captured = {}
+
+        async def fake_exec(*cmd, **kw):
+            captured["cmd"] = list(cmd)
+            captured["env"] = kw.get("env", {})
+            raise RuntimeError("captured; abort launch")
+
+        orig = mod.asyncio.create_subprocess_exec
+        mod.asyncio.create_subprocess_exec = fake_exec
+        try:
+            asyncio.run(client._serve())
+        finally:
+            mod.asyncio.create_subprocess_exec = orig
+        return captured
+
+    def test_auth_args_only_when_nbi_supplies_the_key(self):
+        from notebook_intelligence.acp_registry import codex_auth_args
+        assert codex_auth_args("OPENAI_API_KEY") == self.AUTH_ARGS
+        assert codex_auth_args("") == []
+
+    def test_a_configured_key_launches_codex_with_the_key_contained(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        captured = self._launch(tmp_path, {"api_key": "sk-test"})
+        assert captured["cmd"][-6:] == self.AUTH_ARGS
+        assert captured["env"]["CODEX_HOME"] == str(tmp_path / "codex-home")
+
+    def test_a_key_from_the_environment_is_contained_too(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        captured = self._launch(tmp_path, {})
+        assert captured["cmd"][-6:] == self.AUTH_ARGS
+
+    def test_without_a_key_codex_keeps_its_own_defaults(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        captured = self._launch(tmp_path, {})
+        launch = " ".join(captured["cmd"])
+        assert "cli_auth_credentials_store" not in launch
+        assert "shell_snapshot" not in launch
+        assert "shell_environment_policy" not in launch
+
+    def test_saved_credentials_left_by_earlier_versions_are_removed(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        codex_home = tmp_path / "codex-home"
+        (codex_home / "shell_snapshots").mkdir(parents=True)
+        (codex_home / "auth.json").write_text('{"OPENAI_API_KEY": "sk-old"}')
+        (codex_home / "shell_snapshots" / "abc.sh").write_text("export OPENAI_API_KEY=sk-old")
+        (codex_home / "config.toml").write_text("")
+        self._launch(tmp_path, {"api_key": "sk-new"})
+        assert not (codex_home / "auth.json").exists()
+        assert list((codex_home / "shell_snapshots").iterdir()) == []
+        assert (codex_home / "config.toml").exists()
+
+    def test_the_codex_home_is_left_alone_without_an_nbi_key(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "auth.json").write_text("{}")
+        self._launch(tmp_path, {})
+        assert (codex_home / "auth.json").exists()
+
+    def test_a_credential_file_that_cannot_be_removed_is_logged(self, tmp_path, caplog):
+        from notebook_intelligence.acp_agent import _remove_persisted_codex_credentials
+        (tmp_path / "auth.json").mkdir()
+        _remove_persisted_codex_credentials(str(tmp_path))
+        assert "Could not remove the saved Codex credential" in caplog.text
+        _remove_persisted_codex_credentials(str(tmp_path / "missing"))
 
 
 class TestAssembleQuery:
