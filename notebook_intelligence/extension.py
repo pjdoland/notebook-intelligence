@@ -815,6 +815,10 @@ class ConfigHandler(APIHandler):
     @tornado.web.authenticated
     def post(self):
         data = json.loads(self.request.body)
+        # Re-read config.json first, as the GET handlers do. This handler saves
+        # the whole in-memory config, so without a reload a hand edit made while
+        # the server runs is overwritten by the next settings POST.
+        ai_service_manager.nbi_config.load()
         valid_keys = set([
             "default_chat_mode",
             "chat_model",
