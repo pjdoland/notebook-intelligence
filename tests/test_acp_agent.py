@@ -322,37 +322,78 @@ class TestClientFileSystemNotOffered:
     """NBI does not serve ``fs/read_text_file`` or ``fs/write_text_file``.
 
     They would run in the Jupyter server process, outside any agent sandbox,
-    so a delegating agent could use them to escape its own sandbox. The acp
-    router registers the handlers regardless of the advertised capability, so
-    both the advertisement and the handlers themselves are pinned."""
+    so a delegating agent could reach any path the server can. The acp router
+    registers the handlers regardless of the advertised capability, so the
+    advertisement, the handlers, and the router's answer are all pinned."""
 
     @staticmethod
-    def _client():
-        return _client_with_response(None)
+    def _snapshot(root):
+        return {p: (p.read_bytes() if p.is_file() else None) for p in root.rglob("*")}
 
-    def test_read_is_refused_without_touching_the_file(self, tmp_path):
-        target = tmp_path / "notes.txt"
-        target.write_text("SECRET-CONTENT-7F3A", encoding="utf-8")
+    @pytest.mark.parametrize("layout", ["missing_parent", "existing_parent", "existing_file"])
+    def test_write_is_refused_and_leaves_the_disk_unchanged(self, tmp_path, layout):
+        (tmp_path / "existing").mkdir()
+        if layout == "missing_parent":
+            target = tmp_path / "new" / "planted.txt"
+        elif layout == "existing_parent":
+            target = tmp_path / "existing" / "planted.txt"
+        else:
+            target = tmp_path / "existing" / "kept.txt"
+            target.write_text("ORIGINAL", encoding="utf-8")
+        before = self._snapshot(tmp_path)
 
         with pytest.raises(acp.RequestError) as excinfo:
-            asyncio.run(self._client().read_text_file(path=str(target), session_id="s"))
-
-        assert excinfo.value.to_error_obj()["code"] == -32601
-
-    def test_write_is_refused_without_creating_the_file(self, tmp_path):
-        target = tmp_path / "new" / "planted.txt"
-
-        with pytest.raises(acp.RequestError) as excinfo:
-            asyncio.run(self._client().write_text_file(
+            asyncio.run(_client_with_response(None).write_text_file(
                 content="planted", path=str(target), session_id="s",
             ))
 
         assert excinfo.value.to_error_obj()["code"] == -32601
-        assert not (tmp_path / "new").exists()
+        assert self._snapshot(tmp_path) == before
+
+    def test_read_is_refused_without_returning_the_file(self, tmp_path):
+        target = tmp_path / "notes.txt"
+        target.write_text("SECRET-CONTENT-7F3A", encoding="utf-8")
+
+        with pytest.raises(acp.RequestError) as excinfo:
+            asyncio.run(_client_with_response(None).read_text_file(
+                path=str(target), session_id="s",
+            ))
+
+        error = excinfo.value.to_error_obj()
+        assert error["code"] == -32601
+        assert "SECRET-CONTENT-7F3A" not in repr(error)
+
+    @pytest.mark.parametrize("method,params", [
+        ("fs/read_text_file", {"sessionId": "s", "line": 1, "limit": 5}),
+        ("fs/write_text_file", {"sessionId": "s", "content": "planted"}),
+        ("_nbi/unknown", {}),
+    ])
+    def test_router_answers_method_not_found(self, tmp_path, method, params):
+        """Pin the answer at the protocol boundary, where the router maps
+        request params onto the handler's arguments."""
+        from acp.client.router import build_client_router
+
+        target = tmp_path / "planted.txt"
+        if method.startswith("fs/"):
+            params = {**params, "path": str(target)}
+        router = build_client_router(_client_with_response(None))
+
+        with pytest.raises(acp.RequestError) as excinfo:
+            asyncio.run(router(method, params, False))
+
+        assert excinfo.value.to_error_obj()["code"] == -32601
+        assert not target.exists()
 
     def test_initialize_does_not_advertise_fs(self, tmp_path, monkeypatch):
+        import inspect
+
+        from acp.client.connection import ClientSideConnection
+
         import notebook_intelligence.acp_agent as mod
 
+        # A missed patch must fail fast rather than launch a real agent.
+        monkeypatch.setenv("NBI_ACP_AGENT_COMMAND", "nbi-test-must-not-spawn")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         captured = {}
 
         class FakeProc:
@@ -370,8 +411,14 @@ class TestClientFileSystemNotOffered:
             return FakeProc()
 
         class FakeConn:
-            async def initialize(self, **kw):
-                captured["capabilities"] = kw["client_capabilities"]
+            async def initialize(self, *args, **kwargs):
+                bound = inspect.signature(ClientSideConnection.initialize).bind(
+                    self, *args, **kwargs
+                )
+                captured["capabilities"] = (
+                    bound.arguments.get("client_capabilities")
+                    or schema.ClientCapabilities()
+                )
                 raise RuntimeError("test: capabilities captured, session not started")
 
         monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", fake_exec)
@@ -386,6 +433,9 @@ class TestClientFileSystemNotOffered:
 
         asyncio.run(client._serve())
 
+        assert "capabilities" in captured, (
+            f"_serve never reached initialize: {client._start_error}"
+        )
         fs = captured["capabilities"].fs
         assert fs.read_text_file is False
         assert fs.write_text_file is False

@@ -231,17 +231,15 @@ class _NbiAcpClient(acp.Client):
         return acp.RequestPermissionResponse(outcome=schema.DeniedOutcome(outcome="cancelled"))
 
     # fs/*: not offered. These would run in the Jupyter server process, outside
-    # any agent sandbox, so an agent that delegated file I/O here could escape
-    # its own sandbox, for example by swapping a path for a symlink between a
-    # containment check and the write. Agents do their own file I/O instead:
-    # codex-acp always does, and claude-code-acp keeps its own file tools when
-    # the capability is not advertised. The acp router registers these handlers
-    # whatever NBI advertises, so they must refuse rather than go unused.
+    # any agent sandbox, so serving them would let an agent read or write any
+    # path the server can reach. The spec requires an agent to do its own file
+    # I/O when the capability is not advertised. The acp router registers these
+    # handlers whatever NBI advertises, so they must refuse rather than go unused.
     async def read_text_file(self, path, session_id, limit=None, line=None, **kw):
-        raise acp.RequestError.method_not_found("fs not supported")
+        raise acp.RequestError.method_not_found("fs/read_text_file")
 
     async def write_text_file(self, content, path, session_id, **kw):
-        raise acp.RequestError.method_not_found("fs not supported")
+        raise acp.RequestError.method_not_found("fs/write_text_file")
 
     # terminal/*: not emulated in Phase 1 (Codex runs shell internally).
     async def create_terminal(self, command, session_id, **kw):
@@ -258,6 +256,11 @@ class _NbiAcpClient(acp.Client):
 
     async def release_terminal(self, session_id, terminal_id, **kw):
         return None
+
+    # The inherited acp.Client stub answers any extension request with a null
+    # success, which an agent would read as "handled".
+    async def ext_method(self, method, params):
+        raise acp.RequestError.method_not_found(method)
 
 
 def _block_text(block) -> str:
